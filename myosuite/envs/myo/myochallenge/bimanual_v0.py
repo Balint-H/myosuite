@@ -281,7 +281,7 @@ class BimanualEnvV1(BaseV0):
                 # Must keys
                 ("sparse", 0),
                 ("goal_dist", goal_dis), 
-                ("solved", goal_dis < self.proximity_th and self.goal_touch >= self.TARGET_GOAL_TOUCH),
+                ("solved", goal_dis < self.proximity_th and evaluate_contact_trajectory(self.touch_history) is None),
                 ("done", self._get_done(obj_pos[-1])),
             )
         )
@@ -314,7 +314,7 @@ class BimanualEnvV1(BaseV0):
         return super().step(processed_controls, **kwargs)
 
 
-    def get_metrics(self, paths, successful_steps=5):
+    def get_metrics(self, paths, successful_steps=2):
         """
         Evaluate paths and report metrics
         """
@@ -324,8 +324,7 @@ class BimanualEnvV1(BaseV0):
         # average sucess over entire env horizon
         for path in paths:
             # record success if solved for provided successful_steps, check how the path is stored
-            if np.sum(path['env_infos']['rwd_dict']['solved'] * 1.0) > successful_steps and evaluate_contact_trajectory(
-                    path['env_infos']['touch_history']) is None:
+            if np.sum(path['env_infos']['rwd_dict']['solved'] * 1.0) > successful_steps:
                 num_success += 1
         score = num_success / num_paths
 
