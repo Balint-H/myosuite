@@ -314,7 +314,7 @@ class BimanualEnvV1(BaseV0):
         return super().step(processed_controls, **kwargs)
 
 
-    def get_metrics(self, paths, successful_steps=2):
+    def get_metrics(self, paths, successful_steps=1):
         """
         Evaluate paths and report metrics
         """
