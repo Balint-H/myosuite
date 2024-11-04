@@ -324,7 +324,7 @@ class BimanualEnvV1(BaseV0):
         # average sucess over entire env horizon
         for path in paths:
             # record success if solved for provided successful_steps, check how the path is stored
-            if np.sum(path['env_infos']['rwd_dict']['solved'] * 1.0) > successful_steps:
+            if np.sum(path['env_infos']['rwd_dict']['solved']) > successful_steps:
                 num_success += 1
         score = num_success / num_paths
 
