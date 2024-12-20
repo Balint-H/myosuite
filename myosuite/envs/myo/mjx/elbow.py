@@ -23,10 +23,10 @@ class Elbow(PipelineEnv):
       ctrl_cost_weight=0.1,
       healthy_angle_range=(0, 2.1),
       reset_noise_scale=1e-1,
-      msk=True,
+      is_msk=True,
       **kwargs,
   ):
-    path = rf"./myosuite/envs/myo/assets/elbow/myoelbow_1dof{6 if msk else 0}muscles_mjx.xml"
+    path = rf"./myosuite/envs/myo/assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
     mj_model = mujoco.MjModel.from_xml_path(path)
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
     mj_model.opt.iterations = 6
@@ -110,7 +110,7 @@ class Elbow(PipelineEnv):
     ])
 
 
-def main():
+def main(is_msk=True):
     envs.register_environment('elbow', Elbow)
 
     """## Train Elbow Policy
@@ -121,7 +121,7 @@ def main():
     print("Building environment")
 
     env_name = 'elbow'
-    env = envs.get_environment(env_name)
+    env = envs.get_environment(env_name, is_msk=is_msk)
 
 
     def check_env(model, data):
