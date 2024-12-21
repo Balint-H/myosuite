@@ -28,6 +28,9 @@ class Elbow(PipelineEnv):
   ):
     path = rf"./myosuite/envs/myo/assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
     mj_model = mujoco.MjModel.from_xml_path(path)
+    
+    # Solver params: These are seemingly still stable on CPU mujoco,
+    # but could be unstable in MJX, need to verify.
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
     mj_model.opt.iterations = 6
     mj_model.opt.ls_iterations = 6
@@ -63,6 +66,8 @@ class Elbow(PipelineEnv):
         rng3, (1,), minval=self._healthy_angle_range[0], maxval=self._healthy_angle_range[1]
         )
 
+    # We store the target angle in the info, can't store it as an instance variable,
+    # as it has to be determined in a parallelized manner 
     info = {'rng': rng, 'target_angle': target_angle}
 
     data = self.pipeline_init(qpos, qvel)
@@ -81,6 +86,8 @@ class Elbow(PipelineEnv):
     data = self.pipeline_step(data0, action)
 
     angle_error = state.info['target_angle'][0] - data.qpos[0]
+    # Smooth fall-off on angle reward. Exp is too costly normally,
+    # should replace it later on.
     angle_reward = jp.exp(-self._angle_reward_weight*angle_error*angle_error)
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
 
@@ -99,7 +106,7 @@ class Elbow(PipelineEnv):
   def _get_obs(
       self, data: mjx.Data, action: jp.ndarray
   ) -> jp.ndarray:
-    """Observes humanoid body position, velocities, and angles."""
+    """Observes elbow angle, velocities, and last applied torque."""
     position = data.qpos
 
     # external_contact_forces are excluded
@@ -115,7 +122,7 @@ def main(is_msk=True):
 
     """## Train Elbow Policy
     
-    Let's now train a policy with PPO to make the Humanoid run forwards. Training takes about 9-10 minutes on a Tesla A100 GPU.
+    Let's now train a policy with PPO to move the elbow to a target angle. Training takes about 9-10 minutes on a Tesla A100 GPU.
     """
 
     print("Building environment")
@@ -152,6 +159,7 @@ def main(is_msk=True):
     times = [datetime.now()]
 
     max_y, min_y = 5000, 0
+    # Plot learning curves
     def progress(num_steps, metrics):
       times.append(datetime.now())
       x_data.append(num_steps)
@@ -170,7 +178,7 @@ def main(is_msk=True):
       plt.savefig(f'{num_steps}.png')
 
 
-    # instantiate the environment
+    # Instantiate the environment then train
     print("Jitting then training")
     make_inference_fn, params, _= train_fn(environment=env, progress_fn=progress)
 
