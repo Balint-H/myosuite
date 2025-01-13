@@ -8,7 +8,7 @@
 ====================================================== -->
 
     <include file="../../../../simhive/myo_sim/elbow/assets/myoelbow_assets_mjx.xml"/>
-    <include file="../../../../simhive/myo_sim/elbow/assets/myoelbow_1dof6muscles_body.xml"/>
+    <include file="../../../../simhive/myo_sim/elbow/assets/myoelbow_1dof6muscles_body_mjx.xml"/>
     <include file="../../../../simhive/myo_sim/scene/myosuite_scene.xml"/>
     <compiler meshdir='../../../../simhive/myo_sim/' texturedir='../../../../simhive/myo_sim/'/>
 
