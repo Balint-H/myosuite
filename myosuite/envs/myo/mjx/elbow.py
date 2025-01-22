@@ -26,7 +26,7 @@ class Elbow(PipelineEnv):
       is_msk=True,
       **kwargs,
   ):
-    path = rf"./myosuite/envs/myo/assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
+    path = rf"../assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
     mj_model = mujoco.MjModel.from_xml_path(path)
     
     # Solver params: These are seemingly still stable on CPU mujoco,
@@ -72,7 +72,7 @@ class Elbow(PipelineEnv):
 
     data = self.pipeline_init(qpos, qvel)
 
-    obs = self._get_obs(data, jp.zeros(self.sys.nu))
+    obs = self._get_obs(data, jp.zeros(self.sys.nu), info)
     reward, done, zero = jp.zeros(3)
     metrics = {
         'angle_reward': zero,
@@ -91,7 +91,7 @@ class Elbow(PipelineEnv):
     angle_reward = jp.exp(-self._angle_reward_weight*angle_error*angle_error)
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
 
-    obs = self._get_obs(data, action)
+    obs = self._get_obs(data, action, state.info)
     reward = angle_reward - ctrl_cost
     done = 0.0
     state.metrics.update(
@@ -104,7 +104,7 @@ class Elbow(PipelineEnv):
     )
 
   def _get_obs(
-      self, data: mjx.Data, action: jp.ndarray
+      self, data: mjx.Data, action: jp.ndarray, info
   ) -> jp.ndarray:
     """Observes elbow angle, velocities, and last applied torque."""
     position = data.qpos
@@ -114,6 +114,7 @@ class Elbow(PipelineEnv):
         position,
         data.qvel,
         data.qfrc_actuator,
+        info['target_angle']
     ])
 
 
@@ -140,11 +141,6 @@ def main(is_msk=True):
         reward = angle_reward - ctrl_cost
         data.ctrl = np.random.uniform(-1, 1, (env.action_size,))
         assert not np.isnan(reward)
-
-    mj_model = env.sys.mj_model
-    mj_data = mujoco.MjData(mj_model)
-    mujoco.set_mjcb_control(check_env)
-    mujoco.viewer.launch(mj_model, mj_data)
 
     train_fn = functools.partial(
         ppo.train, num_timesteps=20_000_000, num_evals=5, reward_scaling=0.1,
