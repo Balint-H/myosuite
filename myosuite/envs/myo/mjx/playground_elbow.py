@@ -99,8 +99,8 @@ class PlaygroundElbow(mjx_env.MjxEnv):
 
     def step(self, state: State, action: jp.ndarray) -> State:
         """Runs one timestep of the environment's dynamics."""
-        data0 = state.pipeline_state
-        data = self.pipeline_step(data0, action)
+        data0 = state.data
+        data = mjx_env.step(self.mjx_model, data0, action)
 
         angle_error = state.info['target_angle'][0] - data.qpos[0]
         # Smooth fall-off on angle reward. Exp is too costly normally,
@@ -117,7 +117,7 @@ class PlaygroundElbow(mjx_env.MjxEnv):
         )
 
         return state.replace(
-            pipeline_state=data, obs=obs, reward=reward, done=done
+            data=data, obs=obs, reward=reward, done=done
         )
 
     def _get_obs(
@@ -151,73 +151,3 @@ class PlaygroundElbow(mjx_env.MjxEnv):
     def mjx_model(self) -> mjx.Model:
         return self._mjx_model
 
-
-def main(is_msk=True):
-    envs.register_environment('elbow', Elbow)
-
-    """## Train Elbow Policy
-
-    Let's now train a policy with PPO to move the elbow to a target angle. Training takes about 9-10 minutes on a Tesla A100 GPU.
-    """
-
-    print("Building environment")
-
-    env_name = 'elbow'
-    env = envs.get_environment(env_name, is_msk=is_msk)
-
-    def check_env(model, data):
-        obs = env._get_obs(data, data.ctrl)
-        assert not np.any(np.isnan(obs))
-        angle_error = 1 - data.qpos[0]
-        angle_reward = np.exp(-env._angle_reward_weight * angle_error * angle_error)
-        ctrl_cost = env._ctrl_cost_weight * np.sum(np.square(data.ctrl))
-        reward = angle_reward - ctrl_cost
-        data.ctrl = np.random.uniform(-1, 1, (env.action_size,))
-        assert not np.isnan(reward)
-
-    train_fn = functools.partial(
-        ppo.train, num_timesteps=20_000_000, num_evals=5, reward_scaling=0.1,
-        episode_length=1000, normalize_observations=True, action_repeat=1,
-        unroll_length=10, num_minibatches=1, num_updates_per_batch=8,
-        discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=10,
-        batch_size=10, seed=0)
-
-    x_data = []
-    y_data = []
-    ydataerr = []
-    times = [datetime.now()]
-
-    max_y, min_y = 5000, 0
-
-    # Plot learning curves
-    def progress(num_steps, metrics):
-        times.append(datetime.now())
-        x_data.append(num_steps)
-        y_data.append(metrics['eval/episode_reward'])
-        ydataerr.append(metrics['eval/episode_reward_std'])
-
-        plt.xlim([0, train_fn.keywords['num_timesteps'] * 1.25])
-        plt.ylim([min_y, max_y])
-
-        plt.xlabel('# environment steps')
-        plt.ylabel('reward per episode')
-        plt.title(f'y={y_data[-1]:.3f}')
-
-        plt.errorbar(
-            x_data, y_data, yerr=ydataerr)
-        plt.savefig(f'{num_steps}.png')
-
-    # Instantiate the environment then train
-    print("Jitting then training")
-    make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
-
-    print(f'time to jit: {times[1] - times[0]}')
-    print(f'time to train: {times[-1] - times[1]}')
-
-    # Save Model
-    model_path = './elbow_params.pickle'
-    model.save_params(model_path, params)
-
-
-if __name__ == '__main__':
-    main()
