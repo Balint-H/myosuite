@@ -44,6 +44,8 @@ from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
+from playground_elbow import PlaygroundElbow, default_config
+
 xla_flags = os.environ.get("XLA_FLAGS", "")
 xla_flags += " --xla_gpu_triton_gemm_any=True"
 os.environ["XLA_FLAGS"] = xla_flags
@@ -154,11 +156,13 @@ def main(argv):
   """Run training and evaluation for the specified environment."""
 
   del argv
-
+  print(f"Current backend: {jax.default_backend()}")
+  registry.locomotion.register_environment("MyoElbow", PlaygroundElbow, default_config)
+  registry.locomotion.ALL.append("MyoElbow")
   # Load environment configuration
-  env_cfg = registry.get_default_config(_ENV_NAME.value)
+  env_cfg = default_config()
 
-  ppo_params = get_rl_config(_ENV_NAME.value)
+  ppo_params = env_cfg.ppo_config
 
   if _NUM_TIMESTEPS.present:
     ppo_params.num_timesteps = _NUM_TIMESTEPS.value

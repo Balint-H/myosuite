@@ -28,22 +28,51 @@ from mujoco_playground._src import mjx_env  # Several helper functions are only 
 
 
 def default_config() -> config_dict.ConfigDict:
-  return config_dict.create(
-      ctrl_dt=0.02,
-      sim_dt=0.002,
-      episode_length=1000,
-      action_repeat=1,
-      action_scale=0.5,
-      history_len=1,
-      healthy_angle_range=(0, 2.1),
-      noise_config=config_dict.create(
-          reset_noise_scale=1e-1,
-      ),
-      reward_config=config_dict.create(
-          angle_reward_weight=2.5,
-          ctrl_cost_weight=0.1,
-      )
-  )
+    env_config = config_dict.create(
+        ctrl_dt=0.02,
+        sim_dt=0.002,
+        episode_length=4,
+        action_repeat=1,
+        action_scale=0.5,
+        history_len=1,
+        healthy_angle_range=(0, 2.1),
+        noise_config=config_dict.create(
+            reset_noise_scale=1e-1,
+        ),
+        reward_config=config_dict.create(
+            angle_reward_weight=2.5,
+            ctrl_cost_weight=0.1,
+        )
+    )
+
+    rl_config = config_dict.create(
+        num_timesteps=100_000_000,
+        num_evals=10,
+        reward_scaling=1.0,
+        episode_length=env_config.episode_length,
+        clipping_epsilon=0.2,
+        normalize_observations=True,
+        action_repeat=1,
+        unroll_length=20,
+        num_minibatches=32,
+        num_updates_per_batch=4,
+        num_resets_per_eval=1,
+        discounting=0.97,
+        learning_rate=3e-4,
+        entropy_cost=0.005,
+        num_envs=8192,
+        batch_size=256,
+        max_grad_norm=1.0,
+        network_factory=config_dict.create(
+            policy_hidden_layer_sizes=(512, 256, 128),
+            value_hidden_layer_sizes=(512, 256, 128),
+            policy_obs_key="state",
+            value_obs_key="privileged_state",
+        )
+    )
+    env_config["ppo_config"] = rl_config
+    return env_config
+
 
 class PlaygroundElbow(mjx_env.MjxEnv):
     """Made using the Berkeley Humanoid environment as a template."""
@@ -80,7 +109,7 @@ class PlaygroundElbow(mjx_env.MjxEnv):
         )
 
         target_angle = jax.random.uniform(
-            rng3, (1,), minval=self._config.healthy_angle_range[0], maxval=self._config._healthy_angle_range[1]
+            rng3, (1,), minval=self._config.healthy_angle_range[0], maxval=self._config.healthy_angle_range[1]
         )
 
         # We store the target angle in the info, can't store it as an instance variable,
@@ -150,4 +179,3 @@ class PlaygroundElbow(mjx_env.MjxEnv):
     @property
     def mjx_model(self) -> mjx.Model:
         return self._mjx_model
-

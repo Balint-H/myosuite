@@ -123,3 +123,5 @@ tags
 osl.csv
 osl.log
 /workspace
+
+*mjx/logs/*
