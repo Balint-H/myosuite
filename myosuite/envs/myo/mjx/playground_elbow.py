@@ -31,7 +31,7 @@ def default_config() -> config_dict.ConfigDict:
     env_config = config_dict.create(
         ctrl_dt=0.02,
         sim_dt=0.002,
-        episode_length=4,
+        episode_length=1000,
         action_repeat=1,
         action_scale=0.5,
         history_len=1,

@@ -20,6 +20,10 @@ import json
 import os
 import time
 import warnings
+import pickle
+import h5py
+
+import mujoco.gl_context
 
 from absl import app
 from absl import flags
@@ -31,6 +35,7 @@ from etils import epath
 from flax.training import orbax_utils
 import jax
 import jax.numpy as jp
+import mediapy as media
 from ml_collections import config_dict
 import mujoco
 from orbax import checkpoint as ocp
@@ -44,12 +49,12 @@ from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
-from playground_elbow import PlaygroundElbow, default_config
+from myosuite.envs.myo.mjx.playground_elbow import PlaygroundElbow, default_config
 
-xla_flags = os.environ.get("XLA_FLAGS", "")
-xla_flags += " --xla_gpu_triton_gemm_any=True"
-os.environ["XLA_FLAGS"] = xla_flags
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# xla_flags = os.environ.get("XLA_FLAGS", "")
+# xla_flags += " --xla_gpu_triton_gemm_any=True"
+# os.environ["XLA_FLAGS"] = xla_flags
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["MUJOCO_GL"] = "egl"
 
 # Ignore the info logs from brax
@@ -155,6 +160,7 @@ def get_rl_config(env_name: str) -> config_dict.ConfigDict:
 def main(argv):
   """Run training and evaluation for the specified environment."""
 
+
   del argv
   print(f"Current backend: {jax.default_backend()}")
   registry.locomotion.register_environment("MyoElbow", PlaygroundElbow, default_config)
@@ -166,6 +172,8 @@ def main(argv):
 
   if _NUM_TIMESTEPS.present:
     ppo_params.num_timesteps = _NUM_TIMESTEPS.value
+  if _PLAY_ONLY.present:
+    ppo_params.num_timesteps = 0
   if _NUM_EVALS.present:
     ppo_params.num_evals = _NUM_EVALS.value
   if _REWARD_SCALING.present:
@@ -245,18 +253,16 @@ def main(argv):
   # Handle checkpoint loading
   if _LOAD_CHECKPOINT_PATH.value is not None:
     # Convert to absolute path
-    _LOAD_CHECKPOINT_PATH.value = epath.Path(
-        _LOAD_CHECKPOINT_PATH.value
-    ).resolve()
-    if _LOAD_CHECKPOINT_PATH.value.is_dir():
-      latest_ckpts = list(_LOAD_CHECKPOINT_PATH.value.glob("*"))
+    ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value).resolve()
+    if ckpt_path.is_dir():
+      latest_ckpts = list(ckpt_path.glob("*"))
       latest_ckpts = [ckpt for ckpt in latest_ckpts if ckpt.is_dir()]
       latest_ckpts.sort(key=lambda x: int(x.name))
       latest_ckpt = latest_ckpts[-1]
       restore_checkpoint_path = latest_ckpt
       print(f"Restoring from: {restore_checkpoint_path}")
     else:
-      restore_checkpoint_path = _LOAD_CHECKPOINT_PATH.value
+      restore_checkpoint_path = ckpt_path
       print(f"Restoring from checkpoint: {restore_checkpoint_path}")
   else:
     print("No checkpoint path provided, not restoring from checkpoint")
@@ -269,7 +275,7 @@ def main(argv):
 
   # Save environment configuration
   with open(ckpt_path / "config.json", "w", encoding="utf-8") as fp:
-    json.dump(env_cfg.to_json(), fp, indent=4)
+    json.dump(env_cfg.to_dict(), fp, indent=4)
 
   # Define policy parameters function for saving checkpoints
   def policy_params_fn(current_step, make_policy, params):  # pylint: disable=unused-argument
@@ -410,16 +416,12 @@ def main(argv):
 
   traj = rollout[::render_every]
 
-  scene_option = mujoco.MjvOption()
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = False
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
-
-  frames = eval_env.render(
-      traj, height=480, width=640, scene_option=scene_option
-  )
-
-  print("Rollout video saved as 'rollout.mp4'.")
+  with h5py.File('traj.h5', 'w') as h5f:
+      h5f.create_dataset('qpos', data=[s.data.qpos for s in traj])
+      h5f.create_dataset('ctrl', data=[s.data.ctrl for s in traj])
+      h5f.close()
+  with open('traj.pickle', 'wb') as handle:
+      pickle.dump(traj, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
