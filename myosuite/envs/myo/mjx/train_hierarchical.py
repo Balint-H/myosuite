@@ -24,7 +24,7 @@ from typing import Any, Callable, Mapping, Optional, Tuple, Union
 from absl import logging
 from brax import base
 from brax import envs
-from brax.training import acting
+import acting_hierarchical
 from brax.training import gradients
 from brax.training import logger as metric_logger
 from brax.training import pmap
@@ -234,7 +234,7 @@ def train(
     num_updates_per_batch: int = 2,
     num_resets_per_eval: int = 0,
     normalize_observations: bool = False,
-        
+
     hl_network_factory: types.NetworkFactory[
         ppo_networks.PPONetworks
     ] = ppo_networks.make_ppo_networks,
@@ -257,11 +257,15 @@ def train(
     training_metrics_steps: Optional[int] = None,
     # callbacks
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
-    policy_params_fn: Callable[..., None] = lambda *args: None,
+    hl_policy_params_fn: Callable[..., None] = lambda *args: None,
+    ll_policy_params_fn: Callable[..., None] = lambda *args: None,
     # checkpointing
-    save_checkpoint_path: Optional[str] = None,
-    restore_checkpoint_path: Optional[str] = None,
-    restore_params: Optional[Any] = None,
+    hl_save_checkpoint_path: Optional[str] = None,
+    ll_save_checkpoint_path: Optional[str] = None,
+    hl_restore_checkpoint_path: Optional[str] = None,
+    ll_restore_checkpoint_path: Optional[str] = None,
+    hl_restore_params: Optional[Any] = None,
+    ll_restore_params: Optional[Any] = None,
     restore_value_fn: bool = True,
     # endregion
 ):
@@ -536,7 +540,8 @@ def train(
   def hierarchy_sgd_step(
       carry,
       unused_t,
-      data: types.Transition,
+      hl_data: types.Transition,
+      ll_data: types.Transition,
       hl_normalizer_params: running_statistics.RunningStatisticsState,
       ll_normalizer_params: running_statistics.RunningStatisticsState,
   ):
@@ -544,125 +549,166 @@ def train(
     key, key_perm, key_grad = jax.random.split(key, 3)
 
     if augment_pixels:
-      key, key_rt = jax.random.split(key)
-      r_translate = functools.partial(_random_translate_pixels, key=key_rt)
-      data = types.Transition(
-          observation=r_translate(data.observation),
-          action=data.action,
-          reward=data.reward,
-          discount=data.discount,
-          next_observation=r_translate(data.next_observation),
-          extras=data.extras,
+      key, key_hl_rt, key_ll_rt = jax.random.split(key,3)
+      r_translate = functools.partial(_random_translate_pixels, key=key_hl_rt)
+      hl_data = types.Transition(
+          observation=r_translate(hl_data.observation),
+          action=hl_data.action,
+          reward=hl_data.reward,
+          discount=hl_data.discount,
+          next_observation=r_translate(hl_data.next_observation),
+          extras=hl_data.extras,
+      )
+      r_translate = functools.partial(_random_translate_pixels, key=key_ll_rt)
+      ll_data = types.Transition(
+          observation=r_translate(ll_data.observation),
+          action=ll_data.action,
+          reward=ll_data.reward,
+          discount=ll_data.discount,
+          next_observation=r_translate(ll_data.next_observation),
+          extras=ll_data.extras,
       )
 
-    def convert_data(x: jnp.ndarray):
+    def convert_data(x: jnp.ndarray):  # TODO: Consider if we want the same shuffle for the two datas like this
       x = jax.random.permutation(key_perm, x)
       x = jnp.reshape(x, (num_minibatches, -1) + x.shape[1:])
       return x
 
-    shuffled_data = jax.tree_util.tree_map(convert_data, data)
+    shuffled_hl_data = jax.tree_util.tree_map(convert_data, hl_data)
+    shuffled_ll_data = jax.tree_util.tree_map(convert_data, ll_data)
     ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), _), metrics = jax.lax.scan(
         functools.partial(hierarchy_minibatch_step,
                           hl_normalizer_params=hl_normalizer_params,
                           ll_normalizer_params=ll_normalizer_params),
         ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key_grad),
-        shuffled_data,
+        (shuffled_hl_data, shuffled_ll_data),
         length=num_minibatches,
     )
     return ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key), metrics
 
-  def training_step(
-      carry: Tuple[TrainingState, envs.State, PRNGKey], unused_t
-  ) -> Tuple[Tuple[TrainingState, envs.State, PRNGKey], Metrics]:
+  def hierarchy_training_step(
+      carry: Tuple[Tuple[TrainingState, TrainingState], envs.State, PRNGKey], unused_t
+  ) -> Tuple[Tuple[Tuple[TrainingState, TrainingState], envs.State, PRNGKey], Metrics]:
     (hl_training_state, ll_training_state), state, key = carry
     key_sgd, key_generate_unroll, new_key = jax.random.split(key, 3)
 
-    policy = make_hl_policy((
+    hl_policy = make_hl_policy((
         hl_training_state.normalizer_params,
         hl_training_state.params.policy,
         hl_training_state.params.value,
     ))
 
+    ll_policy = make_ll_policy((
+        ll_training_state.normalizer_params,
+        ll_training_state.params.policy,
+        ll_training_state.params.value,
+    ))
+
     def f(carry, unused_t):
       current_state, current_key = carry
       current_key, next_key = jax.random.split(current_key)
-      next_state, data = acting.generate_unroll(
+      next_state, hl_data, ll_data = acting_hierarchical.generate_unroll(
           env,
           current_state,
-          policy,
+          hl_policy,
+          ll_policy,
           current_key,
           unroll_length,
           extra_fields=('truncation', 'episode_metrics', 'episode_done'),
       )
-      return (next_state, next_key), data
+      return (next_state, next_key), hl_data, ll_data
 
-    (state, _), data = jax.lax.scan(
+    (state, _), hl_data, ll_data = jax.lax.scan(
         f,
         (state, key_generate_unroll),
         (),
         length=batch_size * num_minibatches // num_envs,
     )
     # Have leading dimensions (batch_size * num_minibatches, unroll_length)
-    data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), data)
-    data = jax.tree_util.tree_map(
-        lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data
+    hl_data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), hl_data)
+    hl_data = jax.tree_util.tree_map(
+        lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), hl_data
     )
-    assert data.discount.shape[1:] == (unroll_length,)
+    assert hl_data.discount.shape[1:] == (unroll_length,)
+
+    ll_data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), ll_data)
+    ll_data = jax.tree_util.tree_map(
+        lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), ll_data
+    )
+    assert ll_data.discount.shape[1:] == (unroll_length,)
 
     if log_training_metrics:  # log unroll metrics
       jax.debug.callback(
           metrics_aggregator.update_episode_metrics,
-          data.extras['state_extras']['episode_metrics'],
-          data.extras['state_extras']['episode_done'],
+          hl_data.extras['state_extras']['episode_metrics'],
+          hl_data.extras['state_extras']['episode_done'],
       )
 
     # Update normalization params and normalize observations.
-    normalizer_params = running_statistics.update(
-        training_state.normalizer_params,
-        _remove_pixels(data.observation),
+    hl_normalizer_params = running_statistics.update(
+        hl_training_state.normalizer_params,
+        _remove_pixels(hl_data.observation),
+        pmap_axis_name=_PMAP_AXIS_NAME,
+    )
+    ll_normalizer_params = running_statistics.update(
+        ll_training_state.normalizer_params,
+        _remove_pixels(ll_data.observation),
         pmap_axis_name=_PMAP_AXIS_NAME,
     )
 
-    (optimizer_state, params, _), metrics = jax.lax.scan(
+    ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), _), metrics = jax.lax.scan(
         functools.partial(
-            sgd_step, data=data, normalizer_params=normalizer_params
+            hierarchy_sgd_step, hl_data=hl_data, ll_data=ll_data,
+            hl_normalizer_params=hl_normalizer_params, ll_normalizer_params=ll_normalizer_params
         ),
-        (training_state.optimizer_state, training_state.params, key_sgd),
+        ((hl_training_state.optimizer_state, ll_training_state.optimizer_state),
+         (hl_training_state.params, ll_training_state.params), key_sgd),
         (),
         length=num_updates_per_batch,
     )
 
-    new_training_state = TrainingState(
-        optimizer_state=optimizer_state,
-        params=params,
-        normalizer_params=normalizer_params,
-        env_steps=training_state.env_steps + env_step_per_training_step,
+    new_hl_training_state = TrainingState(
+        optimizer_state=hl_optimizer_state,
+        params=hl_params,
+        normalizer_params=hl_normalizer_params,
+        env_steps=hl_training_state.env_steps + env_step_per_training_step,
     )
-    return (new_training_state, state, new_key), metrics
+
+    new_ll_training_state = TrainingState(
+        optimizer_state=ll_optimizer_state,
+        params=ll_params,
+        normalizer_params=ll_normalizer_params,
+        env_steps=ll_training_state.env_steps + env_step_per_training_step,
+    )
+    return ((new_hl_training_state, new_ll_training_state), state, new_key), metrics
 
   def training_epoch(
-      training_state: TrainingState, state: envs.State, key: PRNGKey
-  ) -> Tuple[TrainingState, envs.State, Metrics]:
-    (training_state, state, _), loss_metrics = jax.lax.scan(
-        training_step,
-        (training_state, state, key),
+      hl_training_state: TrainingState, ll_training_state: TrainingState, state: envs.State, key: PRNGKey
+  ) -> Tuple[Tuple[TrainingState, TrainingState], envs.State, Metrics]:
+    ((hl_training_state, ll_training_state), state, _), loss_metrics = jax.lax.scan(
+        hierarchy_training_step,
+        ((hl_training_state, ll_training_state), state, key),
         (),
         length=num_training_steps_per_epoch,
     )
     loss_metrics = jax.tree_util.tree_map(jnp.mean, loss_metrics)
-    return training_state, state, loss_metrics
+    return (hl_training_state, ll_training_state), state, loss_metrics
 
   training_epoch = jax.pmap(training_epoch, axis_name=_PMAP_AXIS_NAME)
 
   # Note that this is NOT a pure jittable method.
-  def training_epoch_with_timing(
-      training_state: TrainingState, env_state: envs.State, key: PRNGKey
-  ) -> Tuple[TrainingState, envs.State, Metrics]:
+  def hierarchy_training_epoch_with_timing(
+      hl_training_state: TrainingState,
+      ll_training_state: TrainingState,
+      env_state: envs.State, key: PRNGKey
+  ) -> Tuple[Tuple[TrainingState, TrainingState], envs.State, Metrics]:
     nonlocal training_walltime
     t = time.time()
-    training_state, env_state = _strip_weak_type((training_state, env_state))
-    result = training_epoch(training_state, env_state, key)
-    training_state, env_state, metrics = _strip_weak_type(result)
+    hl_training_state, ll_training_state, env_state = _strip_weak_type((hl_training_state,
+                                                                        ll_training_state,
+                                                                        env_state))
+    result = training_epoch(hl_training_state, ll_training_state, env_state, key)
+    (hl_training_state, ll_training_state), env_state, metrics = _strip_weak_type(result)
 
     metrics = jax.tree_util.tree_map(jnp.mean, metrics)
     jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
@@ -679,60 +725,111 @@ def train(
         'training/walltime': training_walltime,
         **{f'training/{name}': value for name, value in metrics.items()},
     }
-    return training_state, env_state, metrics  # pytype: disable=bad-return-type  # py311-upgrade
+    return (hl_training_state, ll_training_state), env_state, metrics  # pytype: disable=bad-return-type  # py311-upgrade
 
-  # Initialize model params and training state.
-  init_params = ppo_losses.PPONetworkParams(
-      policy=ppo_network.policy_network.init(key_policy),
-      value=ppo_network.value_network.init(key_value),
+  # region Initialize model params and training state
+  hl_init_params = ppo_losses.PPONetworkParams(
+      policy=hl_ppo_network.policy_network.init(key_policy),
+      value=hl_ppo_network.value_network.init(key_value),
   )
 
-  obs_shape = jax.tree_util.tree_map(
+  obs_shape = jax.tree_util.tree_map(  # TODO: check if we need sub obs shapes?
       lambda x: specs.Array(x.shape[-1:], jnp.dtype('float32')), env_state.obs
   )
-  training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
-      optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
-      params=init_params,
+  hl_training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
+      optimizer_state=hl_optimizer.init(hl_init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
+      params=hl_init_params,
       normalizer_params=running_statistics.init_state(
           _remove_pixels(obs_shape)
       ),
       env_steps=0,
   )
 
-  if restore_checkpoint_path is not None:
-    params = checkpoint.load(restore_checkpoint_path)
-    value_params = params[2] if restore_value_fn else init_params.value
-    training_state = training_state.replace(
-        normalizer_params=params[0],
-        params=training_state.params.replace(
-            policy=params[1], value=value_params
+  ll_init_params = ppo_losses.PPONetworkParams(
+      policy=ll_ppo_network.policy_network.init(key_policy),
+      value=ll_ppo_network.value_network.init(key_value),
+  )
+
+  ll_training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
+      optimizer_state=ll_optimizer.init(ll_init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
+      params=ll_init_params,
+      normalizer_params=running_statistics.init_state(
+          _remove_pixels(obs_shape)
+      ),
+      env_steps=0,
+  )
+  # endregion
+
+  # region Load checkpoints
+  if hl_restore_checkpoint_path is not None:
+    hl_params = checkpoint.load(hl_restore_checkpoint_path)
+    value_params = hl_params[2] if restore_value_fn else hl_init_params.value
+    hl_training_state = hl_training_state.replace(
+        normalizer_params=hl_params[0],
+        params=hl_training_state.params.replace(
+            policy=hl_params[1], value=value_params
         ),
     )
 
-  if restore_params is not None:
-    logging.info('Restoring TrainingState from `restore_params`.')
-    value_params = restore_params[2] if restore_value_fn else init_params.value
-    training_state = training_state.replace(
-        normalizer_params=restore_params[0],
-        params=training_state.params.replace(
-            policy=restore_params[1], value=value_params
+  if hl_restore_params is not None:
+    logging.info('Restoring High-level TrainingState from `restore_params`.')
+    value_params = hl_restore_params[2] if restore_value_fn else hl_init_params.value
+    hl_training_state = hl_training_state.replace(
+        normalizer_params=hl_restore_params[0],
+        params=hl_training_state.params.replace(
+            policy=hl_restore_params[1], value=value_params
         ),
     )
 
+  if ll_restore_checkpoint_path is not None:
+    ll_params = checkpoint.load(ll_restore_checkpoint_path)
+    value_params = ll_params[2] if restore_value_fn else ll_init_params.value
+    ll_training_state = ll_training_state.replace(
+        normalizer_params=ll_params[0],
+        params=ll_training_state.params.replace(
+            policy=ll_params[1], value=value_params
+        ),
+    )
+
+  if ll_restore_params is not None:
+    logging.info('Restoring Low-level TrainingState from `restore_params`.')
+    value_params = ll_restore_params[2] if restore_value_fn else ll_init_params.value
+    ll_training_state = ll_training_state.replace(
+        normalizer_params=ll_restore_params[0],
+        params=ll_training_state.params.replace(
+            policy=ll_restore_params[1], value=value_params
+        ),
+    )
+  # endregion
+
+  # region Early return if no training needed
   if num_timesteps == 0:
     return (
-        make_policy,
+        make_hl_policy,
         (
-            training_state.normalizer_params,
-            training_state.params.policy,
-            training_state.params.value,
+            hl_training_state.normalizer_params,
+            hl_training_state.params.policy,
+            hl_training_state.params.value,
+        ),
+        make_ll_policy,
+        (
+            ll_training_state.normalizer_params,
+            ll_training_state.params.policy,
+            ll_training_state.params.value,
         ),
         {},
     )
+  # endregion
 
-  training_state = jax.device_put_replicated(
-      training_state, jax.local_devices()[:local_devices_to_use]
+  # region Move training states to GPU
+  hl_training_state = jax.device_put_replicated(
+      hl_training_state, jax.local_devices()[:local_devices_to_use]
   )
+
+  ll_training_state = jax.device_put_replicated(
+      ll_training_state, jax.local_devices()[:local_devices_to_use]
+  )
+  # endregion
 
   eval_env = _maybe_wrap_env(
       eval_env or environment,
@@ -745,29 +842,37 @@ def train(
       wrap_env_fn=wrap_env_fn,
       randomization_fn=randomization_fn,
   )
-  evaluator = acting.Evaluator(
+  evaluator = acting_hierarchical.Evaluator(
       eval_env,
-      functools.partial(make_policy, deterministic=deterministic_eval),
+      functools.partial(make_hl_policy, deterministic=deterministic_eval),
+      functools.partial(make_ll_policy, deterministic=deterministic_eval),
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
       key=eval_key,
   )
 
-  # Run initial eval
+  # region Run initial eval
   metrics = {}
   if process_id == 0 and num_evals > 1:
     metrics = evaluator.run_evaluation(
         _unpmap((
-            training_state.normalizer_params,
-            training_state.params.policy,
-            training_state.params.value,
+            hl_training_state.normalizer_params,
+            hl_training_state.params.policy,
+            hl_training_state.params.value,
+        )),
+        _unpmap((
+            ll_training_state.normalizer_params,
+            ll_training_state.params.policy,
+            ll_training_state.params.value,
         )),
         training_metrics={},
     )
     logging.info(metrics)
     progress_fn(0, metrics)
+  # endregion
 
+  # region Run training
   training_metrics = {}
   training_walltime = 0
   current_step = 0
@@ -778,10 +883,10 @@ def train(
       # optimization
       epoch_key, local_key = jax.random.split(local_key)
       epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
-      (training_state, env_state, training_metrics) = (
-          training_epoch_with_timing(training_state, env_state, epoch_keys)
+      ((hl_training_state, ll_training_state), env_state, training_metrics) = (
+          hierarchy_training_epoch_with_timing(hl_training_state, ll_training_state, env_state, epoch_keys)
       )
-      current_step = int(_unpmap(training_state.env_steps))
+      current_step = int(_unpmap(hl_training_state.env_steps))
 
       key_envs = jax.vmap(
           lambda x, s: jax.random.split(x[0], s), in_axes=(0, None)
@@ -792,23 +897,38 @@ def train(
     if process_id != 0:
       continue
 
+    # region Process params after epoch
     # Process id == 0.
-    params = _unpmap((
-        training_state.normalizer_params,
-        training_state.params.policy,
-        training_state.params.value,
+    hl_params = _unpmap((
+        hl_training_state.normalizer_params,
+        hl_training_state.params.policy,
+        hl_training_state.params.value,
     ))
 
-    policy_params_fn(current_step, make_policy, params)
+    ll_params = _unpmap((
+        ll_training_state.normalizer_params,
+        ll_training_state.params.policy,
+        ll_training_state.params.value,
+    ))
 
-    if save_checkpoint_path is not None:
+    hl_policy_params_fn(current_step, make_hl_policy, hl_params)
+    ll_policy_params_fn(current_step, make_ll_policy, ll_params)
+    # endregion
+
+    if hl_save_checkpoint_path is not None:
       checkpoint.save(
-          save_checkpoint_path, current_step, params, ckpt_config
+          hl_save_checkpoint_path, current_step, hl_params, hl_ckpt_config
+      )
+
+    if ll_save_checkpoint_path is not None:
+      checkpoint.save(
+          ll_save_checkpoint_path, current_step, ll_params, ll_ckpt_config
       )
 
     if num_evals > 0:
       metrics = evaluator.run_evaluation(
-          params,
+          hl_params,
+          ll_params,
           training_metrics,
       )
       logging.info(metrics)
@@ -819,12 +939,18 @@ def train(
 
   # If there was no mistakes the training_state should still be identical on all
   # devices.
-  pmap.assert_is_replicated(training_state)
-  params = _unpmap((
-      training_state.normalizer_params,
-      training_state.params.policy,
-      training_state.params.value,
+  pmap.assert_is_replicated(hl_training_state)
+  pmap.assert_is_replicated(ll_training_state)
+  hl_params = _unpmap((
+      hl_training_state.normalizer_params,
+      hl_training_state.params.policy,
+      hl_training_state.params.value,
+  ))
+  ll_params = _unpmap((
+      hl_training_state.normalizer_params,
+      hl_training_state.params.policy,
+      hl_training_state.params.value,
   ))
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()
-  return (make_policy, params, metrics)
+  return ((make_hl_policy, make_ll_policy), (hl_params, ll_params), metrics)
