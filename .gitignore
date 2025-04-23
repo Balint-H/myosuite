@@ -95,6 +95,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myosuite/envs/myo/mjx/logs/
+myosuite/envs/myo/mjx/*.h5
+myosuite/envs/myo/mjx/*.pickle
+myosuite/envs/myo/mjx/*gym
+myosuite/envs/myo/mjx/*.zip
 
 # Spyder project settings
 .spyderproject

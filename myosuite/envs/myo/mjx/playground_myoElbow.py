@@ -1,3 +1,18 @@
+# Copyright 2025 DeepMind Technologies Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Base classes for Berkeley Humanoid."""
 from datetime import datetime
 from typing import Any, Dict, Optional, Union
 
@@ -16,7 +31,7 @@ def default_config() -> config_dict.ConfigDict:
     env_config = config_dict.create(
         ctrl_dt=0.02,
         sim_dt=0.002,
-        episode_length=1000,
+        episode_length=100,
         action_repeat=1,
         action_scale=0.5,
         history_len=1,
@@ -25,34 +40,36 @@ def default_config() -> config_dict.ConfigDict:
             reset_noise_scale=1e-1,
         ),
         reward_config=config_dict.create(
-            angle_reward_weight=2.5,
-            ctrl_cost_weight=0.1,
+            angle_reward_weight=1,
+            ctrl_cost_weight=1,
+            pose_thd=0.35,
+            bonus_weight=4
         )
     )
 
     rl_config = config_dict.create(
-        num_timesteps=20_000_000,
-        num_evals=10,
-        reward_scaling=1.0,
+        num_timesteps=40_000_000,
+        num_evals=16,
+        reward_scaling=0.1,
         episode_length=env_config.episode_length,
-        clipping_epsilon=0.2,
+        clipping_epsilon=0.3,
         normalize_observations=True,
         action_repeat=1,
-        unroll_length=20,
+        unroll_length=10,
         num_minibatches=32,
-        num_updates_per_batch=4,
+        num_updates_per_batch=8,
         num_resets_per_eval=1,
         discounting=0.97,
         learning_rate=3e-4,
-        entropy_cost=0.005,
+        entropy_cost=0.001,
         num_envs=8192,
-        batch_size=256,
+        batch_size=512,
         max_grad_norm=1.0,
         network_factory=config_dict.create(
-            policy_hidden_layer_sizes=(512, 256, 128),
-            value_hidden_layer_sizes=(512, 256, 128),
+            policy_hidden_layer_sizes=(50, 50, 50),
+            value_hidden_layer_sizes=(50, 50, 50),
             policy_obs_key="state",
-            value_obs_key="privileged_state",
+            value_obs_key="state",
         )
     )
     env_config["ppo_config"] = rl_config
@@ -60,8 +77,6 @@ def default_config() -> config_dict.ConfigDict:
 
 
 class PlaygroundElbow(mjx_env.MjxEnv):
-    """Made using the Berkeley Humanoid environment as a template."""
-
     def __init__(
             self,
             config: config_dict.ConfigDict = default_config(),
@@ -87,12 +102,9 @@ class PlaygroundElbow(mjx_env.MjxEnv):
 
         low, hi = -self._config.noise_config.reset_noise_scale, self._config.noise_config.reset_noise_scale
         qpos = self.mjx_model.qpos0 + jax.random.uniform(
-            rng1, (self.mjx_model.nq,), minval=low, maxval=hi
+            rng1, (self.mjx_model.nq,), minval=self.mjx_model.jnt_range[:,0], maxval=self.mjx_model.jnt_range[:,1]
         )
-        qvel = jax.random.uniform(
-            rng2, (self.mjx_model.nv,), minval=low, maxval=hi
-        )
-
+        qvel = jp.array([0.0])
         target_angle = jax.random.uniform(
             rng3, (1,), minval=self._config.healthy_angle_range[0], maxval=self._config.healthy_angle_range[1]
         )
@@ -109,21 +121,23 @@ class PlaygroundElbow(mjx_env.MjxEnv):
             'angle_reward': zero,
             'reward_quadctrl': zero,
         }
-        return State(data, obs, reward, done, metrics, info)
+        return State(data, {"state": obs}, reward, done, metrics, info)
 
     def step(self, state: State, action: jp.ndarray) -> State:
         """Runs one timestep of the environment's dynamics."""
         data0 = state.data
         data = mjx_env.step(self.mjx_model, data0, action)
 
-        angle_error = state.info['target_angle'][0] - data.qpos[0]
+        angle_error = jp.abs(state.info['target_angle'][0] - data.qpos[0])
         # Smooth fall-off on angle reward. Exp is too costly normally,
         # should replace it later on.
-        angle_reward = jp.exp(-self._config.reward_config.angle_reward_weight * angle_error * angle_error)
-        ctrl_cost = self._config.reward_config.ctrl_cost_weight * jp.sum(jp.square(action))
+        angle_reward = -self._config.reward_config.angle_reward_weight * angle_error
+        ctrl_cost = self._config.reward_config.ctrl_cost_weight * jp.sqrt(jp.sum(jp.square(action)))
+        bonus = (jp.where(angle_error<self._config.reward_config.pose_thd, 1, 0)
+                 + jp.where(angle_error<self._config.reward_config.pose_thd*1.5, 1, 0)) * self._config.reward_config.bonus_weight
 
         obs = self._get_obs(data, action, state.info)
-        reward = angle_reward - ctrl_cost
+        reward = angle_reward - ctrl_cost + bonus
         done = 0.0
         state.metrics.update(
             angle_reward=angle_reward,
@@ -131,7 +145,7 @@ class PlaygroundElbow(mjx_env.MjxEnv):
         )
 
         return state.replace(
-            data=data, obs=obs, reward=reward, done=done
+            data=data, obs={"state": obs}, reward=reward, done=done
         )
 
     def _get_obs(
@@ -142,10 +156,11 @@ class PlaygroundElbow(mjx_env.MjxEnv):
 
         # external_contact_forces are excluded
         return jp.concatenate([
+            jp.array([data.time]),
             position,
-            data.qvel,
-            data.qfrc_actuator,
-            info['target_angle']
+            data.qvel*self.mjx_model.opt.timestep,
+            data.act,
+            info['target_angle']-position
         ])
 
     # Accessors.

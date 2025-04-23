@@ -145,9 +145,9 @@ def main(is_msk=True):
     train_fn = functools.partial(
         ppo.train, num_timesteps=20_000_000, num_evals=5, reward_scaling=0.1,
         episode_length=1000, normalize_observations=True, action_repeat=1,
-        unroll_length=10, num_minibatches=1, num_updates_per_batch=8,
-        discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=10,
-        batch_size=10, seed=0)
+        unroll_length=10, num_minibatches=24, num_updates_per_batch=8,
+        discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=3072,
+        batch_size=512, seed=0)
 
     x_data = []
     y_data = []
@@ -161,7 +161,7 @@ def main(is_msk=True):
       x_data.append(num_steps)
       y_data.append(metrics['eval/episode_reward'])
       ydataerr.append(metrics['eval/episode_reward_std'])
-
+      print(f"{num_steps}: reward={metrics['eval/episode_reward']:.3f}")
       plt.xlim([0, train_fn.keywords['num_timesteps'] * 1.25])
       plt.ylim([min_y, max_y])
 

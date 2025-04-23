@@ -10,7 +10,6 @@ import numpy as np
 from myosuite.envs.myo.base_v0 import BaseV0
 
 class PoseEnvV0(BaseV0):
-
     DEFAULT_OBS_KEYS = ['qpos', 'qvel', 'pose_err']
     DEFAULT_RWD_KEYS_AND_WEIGHTS = {
         "pose": 1.0,
@@ -18,7 +17,6 @@ class PoseEnvV0(BaseV0):
         "act_reg": 1.0,
         "penalty": 50,
     }
-
     def __init__(self, model_path, obsd_model_path=None, seed=None, **kwargs):
 
         # EzPickle.__init__(**locals()) is capturing the input dictionary of the init method of this class.
@@ -134,7 +132,8 @@ class PoseEnvV0(BaseV0):
         self.sim.data.qpos[:] = self.target_jnt_value.copy()
         self.sim.forward()
         for isite in range(len(self.tip_sids)):
-            self.sim.model.site_pos[self.target_sids[isite]] = self.sim.data.site_xpos[self.tip_sids[isite]].copy()
+            self.sim.model.site_pos[self.target_sids[isite]] = (
+                self.sim.data.site_xpos[self.tip_sids[isite]].copy())
         if restore_sim:
             self.sim.data.qpos[:] = qpos[:]
             self.sim.data.qvel[:] = qvel[:]
