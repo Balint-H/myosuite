@@ -17,7 +17,7 @@ ppo_network = ppo_networks.make_ppo_networks(
       4,
       6,
       preprocess_observations_fn=normalize)
-model_path = 'elbow_params.pickle'
+model_path = '../params/elbow_params.pickle'
 params = model.load_params(model_path)
 def deterministic_policy (input_data):
 

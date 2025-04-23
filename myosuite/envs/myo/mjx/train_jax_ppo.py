@@ -23,8 +23,6 @@ import warnings
 import pickle
 import h5py
 
-import mujoco.gl_context
-
 from absl import app
 from absl import flags
 from absl import logging
@@ -35,9 +33,7 @@ from etils import epath
 from flax.training import orbax_utils
 import jax
 import jax.numpy as jp
-import mediapy as media
 from ml_collections import config_dict
-import mujoco
 from orbax import checkpoint as ocp
 from tensorboardX import SummaryWriter
 import wandb
@@ -49,7 +45,7 @@ from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
-from myosuite.envs.myo.mjx.playground_elbow import PlaygroundElbow, default_config
+from myosuite.envs.myo.mjx.envs.playground_elbow import PlaygroundElbow, default_config
 
 # xla_flags = os.environ.get("XLA_FLAGS", "")
 # xla_flags += " --xla_gpu_triton_gemm_any=True"

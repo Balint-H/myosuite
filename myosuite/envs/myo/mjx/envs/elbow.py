@@ -183,7 +183,7 @@ def main(is_msk=True):
 
 
     #Save Model
-    model_path = './elbow_params.pickle'
+    model_path = '../params/elbow_params.pickle'
     model.save_params(model_path, params)
 
 if __name__ == '__main__':

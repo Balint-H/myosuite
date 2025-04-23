@@ -29,7 +29,7 @@ class MyoLeg(PipelineEnv):
             exclude_current_positions_from_observation=True,
             **kwargs,
     ):
-        path = rf"../../../simhive/myo_sim/leg/myolegs_abdomen.xml"
+        path = rf"../../../../simhive/myo_sim/leg/myolegs_abdomen.xml"
         mj_model = mujoco.MjModel.from_xml_path(path)
 
         # Solver params: These are seemingly still stable on CPU mujoco,
@@ -200,7 +200,7 @@ def main(is_msk=True):
     print(f'time to train: {times[-1] - times[1]}')
 
     # Save Model
-    model_path = './leg_params.pickle'
+    model_path = '../params/leg_params.pickle'
     model.save_params(model_path, params)
 
 

@@ -91,7 +91,7 @@ ppo_network = ppo_networks.make_ppo_networks(
       366,
       86,
       preprocess_observations_fn=normalize)
-model_path = 'leg_params.pickle'
+model_path = '../params/leg_params.pickle'
 params = model.load_params(model_path)
 if reset_params:
     key = jax.random.PRNGKey(0)

@@ -13,14 +13,10 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.io import model
 from etils import epath
 
-from humanoid import Humanoid
+from myosuite.envs.myo.mjx.envs.humanoid import Humanoid
 from video import images_to_video
 import matplotlib
 matplotlib.use('qtagg')
-from functools import partial
-from brax.training.agents.ppo import losses as ppo_losses
-
-from myo_legs import MyoLeg
 
 xml = epath.Path(epath.resource_path('mujoco')) / (
         'mjx/test_data/humanoid'
@@ -96,7 +92,7 @@ ppo_network = ppo_networks.make_ppo_networks(
       168,
       21,
       preprocess_observations_fn=normalize)
-model_path = 'params.pickle'
+model_path = '../params/params.pickle'
 params = model.load_params(model_path)
 if reset_params:
     key = jax.random.PRNGKey(0)
