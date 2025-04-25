@@ -54,15 +54,17 @@ def default_config() -> config_dict.ConfigDict:
         num_envs=8192,
         batch_size=256,
         max_grad_norm=1.0,
-        # Network factory config might need changes for HL/LL policies
-        # This example assumes both use the same structure, which might not be ideal
-        network_factory=config_dict.create(
+        hl_network_factory=config_dict.create(
             policy_hidden_layer_sizes=(512, 256, 128),
             value_hidden_layer_sizes=(512, 256, 128),
-            # These keys might need updating based on the new obs structure
-            # policy_obs_key="state",
-            # value_obs_key="privileged_state",
+            policy_obs_key="state",
+            value_obs_key="privileged_state",
+        ),
+        ll_network_factory=config_dict.create(
+            policy_hidden_layer_sizes=(512, 256, 128),
+            policy_obs_key="state",
         )
+
     )
     env_config["ppo_config"] = rl_config
     return env_config
