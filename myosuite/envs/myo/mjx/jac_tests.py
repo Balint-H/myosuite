@@ -7,13 +7,14 @@ from mujoco import mjx
 
 path = (epath.Path(epath.resource_path('mujoco')) / (
         'mjx/test_data/actuator/arm26.xml')).as_posix()
+path = r'../../../simhive/myo_sim/arm/myoarm.xml'
 
 model = mujoco.MjModel.from_xml_path(path, assets=None)
+model.opt.iterations = 2
+model.opt.ls_iterations = 1
 
 # `data` contains the current dynamic state of the system
 data = mujoco.MjData(model)
-
-
 
 mjx_model = mjx.put_model(model)
 mjx_data = mjx.put_data(model, data)
@@ -55,9 +56,9 @@ def analytical_jac(mjx_model, mjx_data: mjx.Data):
 jac_analytical_func = jax.jit(analytical_jac)
 
 key = jax.random.key(1)
-act = jax.random.uniform(key, (6,))
+act = jax.random.uniform(key, (63,))
 
-jac1 = jac_with_jax_func(jax.random.uniform(key, (6,)), mjx_model, mjx_data )
+jac1 = jac_with_jax_func(jax.random.uniform(key, (63,)), mjx_model, mjx_data )
 jac2 = jac_analytical_func( mjx_model, mjx_data )
 
 print(jac1)
@@ -72,5 +73,30 @@ def jac_analytical(mjx_model=mjx_model, mjx_data=mjx_data, jac_func=jac_analytic
     cur_jac = jac_func(mjx_model, mjx_data)
     return mjx_data, mjx_model, cur_jac
 
-print(timeit.timeit("jac_with_jax()", setup="from __main__ import jac_with_jax", number=50000, globals={'key':key}))
-print(timeit.timeit("jac_analytical()", setup="from __main__ import jac_analytical", number=50000, globals={'key':key}))
+# print(timeit.timeit("f()",
+#                     setup="from __main__ import jac_with_jax;"
+#                           "import jax;"
+#                           "f=jax.jit(jac_with_jax);"
+#                           "f()",
+#                     number=3000, globals={'key':key}))
+# print(timeit.timeit("f()",
+#                     setup="from __main__ import jac_analytical;"
+#                           "import jax;"
+#                           "f=jax.jit(jac_analytical);"
+#                           "f()",
+#                     number=3000,
+#                     globals={'key':key}))
+
+mjx_data = mjx.fwd_actuation(mjx_model, mjx_data)
+qfrc = mjx_data.qfrc_actuator
+
+@jax.jit
+def pinv_solve(jac=jac1, qfrc=qfrc):
+  return jax.numpy.linalg.pinv(jac)@qfrc
+
+@jax.jit
+def lststq_solve(jac=jac1, qfrc=qfrc):
+  return jax.numpy.linalg.lstsq(jac, qfrc)
+
+print(timeit.timeit("pinv_solve()", setup="from __main__ import pinv_solve; pinv_solve()", number=10000, globals={'key':key}))
+print(timeit.timeit("lststq_solve()", setup="from __main__ import lststq_solve; lststq_solve()", number=10000, globals={'key':key}))

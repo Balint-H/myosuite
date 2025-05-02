@@ -68,7 +68,7 @@ class PlaygroundArm(mjx_env.MjxEnv):
             is_msk=True
     ) -> None:
         super().__init__(config, config_overrides)
-        xml_path = rf"../../../simhive/myo_sim/arm/myoarm.xml"
+        xml_path = rf"../assets/arm/myoarm_relocate_mjx.xml"
 
         spec = mujoco.MjSpec.from_file(xml_path)
         geoms = spec.worldbody.find_all(mujoco.mjtObj.mjOBJ_GEOM)

@@ -1,6 +1,7 @@
 from typing import Any, Tuple
 
 import jax
+import optax
 from jax import numpy as jnp
 from brax.training.types import Params, Metrics
 from train_hierarchical import LLSupervisedData
@@ -8,7 +9,7 @@ from brax.training.networks import FeedForwardNetwork
 from mujoco import mjx
 
 
-@jax.custom_jvp
+@jax.custom_vjp
 def hierarchical_ll_loss_head(
     logits,
     data: LLSupervisedData,
@@ -20,20 +21,29 @@ def hierarchical_ll_loss_head(
   Returns:
     A tuple (loss, metrics)
   """
-  data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1, x.shape[-1])), data)
-  hl_torque_error = data.desired_torque-data.torque_designated
-  ll_error, _, _, _ = jax.vmap(jnp.linalg.lstsq)(data.jacobian, hl_torque_error, r_cond=None)
-  ll_loss = jnp.mean(ll_error * ll_error) * 0.5 * 0.5
 
-  return ll_loss, {
-      'll_loss': ll_loss,
+  # flatten batch and time dimensions
+  hl_torque_error = data.torque_designated - data.hl_desired_torque
+  hl_torque_error_flat = jax.tree_util.tree_map(
+    lambda x: jnp.reshape(x, (-1, x.shape[-1])),
+    hl_torque_error
+  )
+
+  hl_torque_loss = 0.5*(hl_torque_error_flat*hl_torque_error_flat).sum(axis=0).mean()
+  return hl_torque_loss, {
+      'torque_loss': hl_torque_loss,
+      'torque_error': hl_torque_error
   }
 
+def hierarchical_ll_loss_fwd(logits, data: LLSupervisedData):
+  # Returns primal output and residuals to be used in backward pass by f_bwd.
+  loss, aux = hierarchical_ll_loss_head(logits, data)
 
-@hierarchical_ll_loss.defjvp
-def hierarchical_ll_loss_jvp(primals, tangents):
-  x, y = primals
-  x_dot, y_dot = tangents
-  ans = f(x, y)
-  ans_dot = -1. * x_dot
-  return ans, ans_dot
+  return (loss, aux), (data.jacobian, aux['torque_error'])
+
+def hierarchical_ll_loss_bwd(res, g):
+  running_grads = jax.vmap((lambda j, e: e@j.T), in_axes=[0, 1], out_axes=[0, 1])(res[0], res[1])
+  return (running_grads*g[0], None)
+
+
+hierarchical_ll_loss_head.defvjp(hierarchical_ll_loss_fwd, hierarchical_ll_loss_bwd)
