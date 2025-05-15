@@ -155,7 +155,7 @@ def main(argv):
 
   del argv
   print(f"Current backend: {jax.default_backend()}")
-  registry.locomotion.register_environment("MyoElbow", PlaygroundElbow, default_config)
+  registry.locomotion.register_environment("MyoElbow", HierarchicalPlaygroundElbow, default_config)
   registry.locomotion.ALL.append("MyoElbow")
   # Load environment configuration
   env_cfg = default_config()

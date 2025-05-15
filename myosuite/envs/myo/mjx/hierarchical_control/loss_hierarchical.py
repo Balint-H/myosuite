@@ -9,6 +9,16 @@ from brax.training.networks import FeedForwardNetwork
 from mujoco import mjx
 
 
+def hierarchical_ll_loss(
+    params: Params,
+    normalizer_params: Any,
+    data: LLSupervisedData,
+    network: FeedForwardNetwork
+):
+  logits = network.apply(normalizer_params, params, data.ll_obs)
+  return hierarchical_ll_loss_head(logits, data)
+
+
 @jax.custom_vjp
 def hierarchical_ll_loss_head(
     logits,
@@ -36,7 +46,6 @@ def hierarchical_ll_loss_head(
   }
 
 def hierarchical_ll_loss_fwd(logits, data: LLSupervisedData):
-  # Returns primal output and residuals to be used in backward pass by f_bwd.
   loss, aux = hierarchical_ll_loss_head(logits, data)
 
   return (loss, aux), (data.jacobian, aux['torque_error'])

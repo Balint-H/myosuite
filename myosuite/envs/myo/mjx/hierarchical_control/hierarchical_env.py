@@ -16,7 +16,7 @@ from mujoco_playground._src.wrapper import Wrapper, BraxDomainRandomizationVmapW
 
 class HierarchicalEnv(mjx_env.MjxEnv, abc.ABC):
   @abc.abstractmethod
-  def high_level_step(self, state: State, action: jax.Array) -> State:
+  def hl_step(self, state: State, action: jax.Array) -> State:
     """Run high-level control, calculate input to low-level systems. Don't run dynamics yet."""
 
   @property
@@ -27,8 +27,8 @@ class HierarchicalEnv(mjx_env.MjxEnv, abc.ABC):
 
 class LLSupervisedData(NamedTuple):
   """Data collected for training the low-level supervised policy."""
-  ll_observation: Dict[str, jp.ndarray]
-  activation_designated: jp.ndarray
+  ll_obs: Dict[str, jp.ndarray]
+  activation_designated: jp.ndarray  # Could be different from logits e.g., stochastic
   hl_desired_torque: jp.ndarray
   torque_designated: jp.ndarray
   # Pre-computed Jacobian: d(torque)/d(act)
@@ -54,7 +54,7 @@ class HierarchicalBraxDomainRandomizationVmapWrapper(BraxDomainRandomizationVmap
   def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
     def high_level_step(mjx_model, s, a):
       env = self._env_fn(mjx_model=mjx_model)
-      return env.high_level_step(s, a)
+      return env.hl_step(s, a)
 
     res = jax.vmap(high_level_step, in_axes=[self._in_axes, 0, 0])(
         self._mjx_model_v, state, action
@@ -70,7 +70,7 @@ class HierarchicalVmapWrapper(brax_training.VmapWrapper):
     super().__init__(env, batch_size)
 
   def high_level_step(self, state: State, action: jax.Array) -> State:
-    return jax.vmap(self.env.high_level_step)(state, action)
+    return jax.vmap(self.env.hl_step)(state, action)
 
 
 class HierarchicalEpisodeWrapper(brax_training.EpisodeWrapper):
@@ -80,12 +80,12 @@ class HierarchicalEpisodeWrapper(brax_training.EpisodeWrapper):
     super().__init__(env, episode_length, action_repeat)
 
   def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-    return self.env.high_level_step(state, action)
+    return self.env.hl_step(state, action)
 
 
 class HierarchicalBraxAutoResetWrapper(BraxAutoResetWrapper):
   def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-    return self.env.high_level_step(state, action)
+    return self.env.hl_step(state, action)
 
 
 def wrap_for_hierarchical_brax_training(

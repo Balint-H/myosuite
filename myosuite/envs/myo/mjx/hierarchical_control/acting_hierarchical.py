@@ -42,7 +42,7 @@ def actor_step(
   """Collect data."""
   hl_key, ll_key, n_key = jax.random.split(key,3)
   hl_actions, hl_policy_extras = hl_policy(env_state.obs["hl_obs"], hl_key)
-  mid_state = env.high_level_step(env_state, hl_actions)
+  mid_state = env.hl_step(env_state, hl_actions)
   actions, ll_policy_extras = ll_policy(mid_state.obs['ll_obs'], ll_key)
 
   nstate = env.step(mid_state, actions)

@@ -621,7 +621,7 @@ def train(
     )
     ll_normalizer_params = running_statistics.update(
         ll_training_state.normalizer_params,
-        _remove_pixels(ll_data.ll_observation),
+        _remove_pixels(ll_data.ll_obs),
         pmap_axis_name=_PMAP_AXIS_NAME,
     )
 

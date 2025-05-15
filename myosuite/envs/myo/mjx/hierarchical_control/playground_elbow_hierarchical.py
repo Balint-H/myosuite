@@ -10,6 +10,7 @@ from mujoco import mjx
 from mujoco_playground import State
 from hierarchical_env import HierarchicalEnv
 from mujoco_playground._src import mjx_env
+from loss_hierarchical import hierarchical_ll_loss
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -22,20 +23,16 @@ def default_config() -> config_dict.ConfigDict:
         history_len=1,
         healthy_angle_range=(0, 2.1),
         pd_config = config_dict.create(kp=1, kd=1),
+        ll_loss_fn = hierarchical_ll_loss,
         noise_config=config_dict.create(
             reset_noise_scale=1e-1,
         ),
         reward_config=config_dict.create(
-            angle_reward_weight=2.5,  # HL reward weight for reaching sampled target
-            ctrl_cost_weight=0.1,      # HL control cost weight
-            # --- LL Reward Weights (Example - customize as needed) ---
-            # ll_angle_reward_weight=2.5, # LL reward for reaching HL target angle
-            # ll_ctrl_cost_weight=0.1,   # LL control cost weight
+            angle_reward_weight=2.5,
+            ctrl_cost_weight=0.1,
         )
     )
 
-    # Note: RL config might need adjustment for hierarchical setup
-    # e.g., separate network factories if HL/LL use different inputs/architectures
     rl_config = config_dict.create(
         num_timesteps=100_000_000,
         num_evals=10,
@@ -167,21 +164,24 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
         reward, done, zero = jp.zeros(3)
         metrics = {
             'angle_reward': zero,
-            'reward_quadctrl': zero,
-            'll_torque_error': zero, # Metric for LL performance
+            'reward_quadctrl': zero
         }
 
         return State(pipeline_state=data, obs=obs, reward=reward, done=done, metrics=metrics, info=info)
 
-    def high_level_step(self, state: State, hl_action: jp.ndarray) -> State:
+    def hl_step(self, state: State, hl_action: jp.ndarray) -> State:
         """Calculates desired torque based on HL modulation of PD error."""
         # hl_action is the HL_modulation signal
-        data = state.pipeline_state
+        data = state.data
         info = state.info
 
-        # Get current PD errors from info (calculated in previous step or reset)
-        raw_pos_error = info['raw_pos_error']
-        raw_vel_error = info['raw_vel_error']
+        ref_time_idx = state.info['ref_time_idx']  # This is incremented in step
+
+        # Calculate PD errors for the *next* timestep (used in next high_level_step)
+        next_qpos_ref_t = self._qpos_ref[ref_time_idx]
+        next_qvel_ref_t = self._qvel_ref[ref_time_idx]
+        raw_pos_error = next_qpos_ref_t - data.qpos
+        raw_vel_error = next_qvel_ref_t - data.qvel
 
         # Modulate position error
         modulated_pos_error = raw_pos_error + hl_action
@@ -195,87 +195,56 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
         # Add desired torque
         ll_observation = {**ll_obs_base, 'desired_torque': desired_torque}
 
-        # Update the observation dict in the state
-        # HL obs likely remains the same until the next physics step updates qpos/qvel
+        # HL obs remain the same - can we instead just overwrite the ll_obs?
         current_obs = state.obs
         new_obs = {
             'hl_obs': current_obs['hl_obs'], # Keep previous HL obs
-            'll_observation': ll_observation # Update LL obs with desired torque
+            'll_obs': ll_observation # Update LL obs with desired torque
         }
 
         # Update info dictionary
-        new_info = info.copy()
-        new_info['desired_torque'] = desired_torque
-        # Note: raw errors for the *next* step will be calculated in env.step
+        state.info['desired_torque'] = desired_torque
+        state.info['ref_time_idx'] = ref_time_idx
 
-        # Return the updated state (only obs and info modified, pipeline_state unchanged)
-        return state.replace(obs=new_obs, info=new_info)
+        return state.replace(obs=new_obs)
 
     def step(self, state: State, action: jp.ndarray) -> State:
         """Applies LL ctrl action, steps physics, calculates rewards and next state."""
-        # state here is the mid_state from actor_step (already processed by high_level_step)
-        # action here is the LL ctrl signal
-        data = state.pipeline_state
-
-        # --- Apply LL Control and Step Physics ---
+        data = state.data
         data = data.replace(ctrl=action)
-        # Handle action repeat if necessary (mjx.step doesn't do it automatically)
-        def physics_step(data_i, _):
-            data_i = data_i.replace(ctrl=action) # Ensure ctrl is applied each substep if needed
-            return mjx.step(self.mjx_model, data_i), None
 
-        next_data, _ = jax.lax.scan(physics_step, data, (), length=self._config.action_repeat)
-        # next_data = mjx.step(self.mjx_model, data) # If action_repeat=1
+        next_data = mjx_env.step(self.mjx_model, data, action, self._config.action_repeat)
 
-        # --- Calculate Results ---
         actual_torque = next_data.qfrc_actuator # Torque resulting from LL ctrl
 
         # Calculate Jacobian d(torque)/d(act) based on the state *before* the step
-        # This state (`data`) had the correct activation (`act`) based on previous `ctrl`
         jac_torque_act = self.calculate_torque_activation_jacobian(data)
 
         # --- Calculate HL Reward ---
-        # Example: Reward based on tracking the reference trajectory point for *this* step
-        # Could also be based on a different overall task goal
-        ref_time_idx = state.info['ref_time_idx']
-        qpos_ref_t = self._qpos_ref[ref_time_idx]
-        angle_error = qpos_ref_t[0] - next_data.qpos[0] # Use next state's position
-        angle_reward = jp.exp(-self._config.reward_config.angle_reward_weight * angle_error**2)
-        # TODO: Decide what ctrl_cost applies to (HL modulation or LL ctrl?)
-        # Using LL ctrl cost here as an example:
-        ll_ctrl_cost = self._config.reward_config.ctrl_cost_weight * jp.sum(jp.square(action))
-        reward = angle_reward - ll_ctrl_cost
+        ctrl_cost = (self._config.reward_config.ctrl_cost_weight
+                     * jp.sum(jp.square(state.obs['ll_obs']['desired_torque']- actual_torque)))
 
-        # --- Update State for Next Step ---
-        # Update reference trajectory index
-        next_ref_time_idx = (ref_time_idx + 1) % self._ref_traj_len
+        state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
+        qpos_ref_t = self._qpos_ref[state.info['ref_time_idx']]
 
-        # Calculate PD errors for the *next* timestep (used in next high_level_step)
-        next_qpos_ref_t = self._qpos_ref[next_ref_time_idx]
-        next_qvel_ref_t = self._qvel_ref[next_ref_time_idx]
-        next_raw_pos_error = next_qpos_ref_t - next_data.qpos
-        next_raw_vel_error = next_qvel_ref_t - next_data.qvel
+        angle_error = qpos_ref_t[0] - next_data.qpos[0]
+        angle_reward = jp.exp(-self._config.reward_config.angle_reward_weight * angle_error ** 2)
+        reward = angle_reward - ctrl_cost
 
         # Prepare next observations
-        next_info_for_obs = {'ref_qpos': next_qpos_ref_t, 'ref_qvel': next_qvel_ref_t} # Pass ref info
+        next_info_for_obs = {'ref_qpos': self._qpos_ref[(state.info['ref_time_idx']+1) % self._ref_traj_len]}
         next_obs = self._get_obs(next_data, next_info_for_obs)
 
         # Update metrics
         current_metrics = state.metrics
-        ll_torque_error_val = jp.mean(jp.square(actual_torque - state.info['desired_torque']))
         current_metrics.update(
             angle_reward=angle_reward,
-            reward_quadctrl=-ll_ctrl_cost,
-            ll_torque_error=ll_torque_error_val,
+            reward_quadctrl=-ctrl_cost
         )
 
         # Update info dictionary for the final returned state
         next_info = state.info.copy() # Start with info from mid_state
         next_info.update({
-            'rng': state.info['rng'], # Pass RNG state along if needed elsewhere
-            'ref_time_idx': next_ref_time_idx,
-            'raw_pos_error': next_raw_pos_error,
-            'raw_vel_error': next_raw_vel_error,
             'actual_torque': actual_torque,
             'jac_torque_act': jac_torque_act,
             # Keep desired_torque from mid_state info if needed for logging
@@ -283,7 +252,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
         })
 
         # Check for episode termination (e.g., time limit handled by wrapper)
-        done = jp.array(0.0) # Add conditions if needed (e.g., joint limits)
+        done = jp.array(0.0)
 
         return state.replace(
             pipeline_state=next_data, obs=next_obs, reward=reward, done=done,
@@ -326,32 +295,20 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
     #TODO needs to be completely redone
     def calculate_torque_activation_jacobian(self, data: mjx.Data) -> jp.ndarray:
-        """Calculates d(torque)/d(act) using JAX AD."""
-
-        # Define function to compute torque from act and static state
-        def compute_torque_from_act(act_input, qpos, qvel, model):
-            # Create data struct with inputs, ensure other needed fields are present
-            # NOTE: mjx.forward recomputes everything, including kinematics.
-            # If possible, more efficient calculation might only recompute
-            # actuator lengths/velocities/forces based on qpos/qvel/act.
-            # This requires deeper knowledge of mjx internal functions.
-            # Using mjx.forward is simpler but potentially less efficient here.
-            temp_data = data.replace(act=act_input, qpos=qpos, qvel=qvel)
-            temp_data = mjx.forward(model, temp_data)
-            return temp_data.qfrc_actuator # actuator forces == joint torques for muscles
-
-        # Compute Jacobian w.r.t first arg (act_input)
-        jacobian_fn = jax.jacfwd(compute_torque_from_act, argnums=0)
-
-        # Pass static arguments separately if JITting
-        jacobian = jacobian_fn(data.act, data.qpos, data.qvel, self.mjx_model)
-
-        expected_shape = (self.mjx_model.nv, self.mjx_model.na)
-        # assert jacobian.shape == expected_shape # Shape assertion might fail with JIT
-        # Use shape check outside JIT or rely on downstream code
-        # print(f"Jacobian shape: {jacobian.shape}")
-
-        return jacobian
+        """Calculates d(torque)/d(act) analytically."""
+        gains = mjx._src.scan.flat(
+            self.mjx_model,
+            mjx._src.support.muscle_gain,
+            'uuuuu',
+            'u',
+            self.mjx_data.actuator_length,
+            self.mjx_data.actuator_velocity,
+            jp.array(self.mjx_model.actuator_lengthrange),
+            jp.array(self.mjx_model.actuator_acc0),
+            self.mjx_model.actuator_gainprm,
+            group_by='u',
+        )
+        return gains[None, :] * data.actuator_moment.T
 
 
     # --- Properties ---

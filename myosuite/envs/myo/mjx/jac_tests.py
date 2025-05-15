@@ -41,14 +41,14 @@ def get_gain(*args):
 def analytical_jac(mjx_model, mjx_data: mjx.Data):
     gains = mjx._src.scan.flat(
       mjx_model,
-      get_gain,
+      mjx._src.support.muscle_gain,
       'uuuuu',
       'u',
-      mjx_model.actuator_gainprm,
       mjx_data.actuator_length,
       mjx_data.actuator_velocity,
       jax.numpy.array(mjx_model.actuator_lengthrange),
       jax.numpy.array(mjx_model.actuator_acc0),
+      mjx_model.actuator_gainprm,
       group_by='u',
     )
     return gains[None, :] * mjx_data.actuator_moment.T
@@ -63,6 +63,7 @@ jac2 = jac_analytical_func( mjx_model, mjx_data )
 
 print(jac1)
 print(jac2)
+print(jax.numpy.sum(jac1-jac2))
 
 
 def jac_with_jax(mjx_model=mjx_model, mjx_data=mjx_data, jac_func=jac_with_jax_func, key=key, act=act):
@@ -73,30 +74,30 @@ def jac_analytical(mjx_model=mjx_model, mjx_data=mjx_data, jac_func=jac_analytic
     cur_jac = jac_func(mjx_model, mjx_data)
     return mjx_data, mjx_model, cur_jac
 
-# print(timeit.timeit("f()",
-#                     setup="from __main__ import jac_with_jax;"
-#                           "import jax;"
-#                           "f=jax.jit(jac_with_jax);"
-#                           "f()",
-#                     number=3000, globals={'key':key}))
-# print(timeit.timeit("f()",
-#                     setup="from __main__ import jac_analytical;"
-#                           "import jax;"
-#                           "f=jax.jit(jac_analytical);"
-#                           "f()",
-#                     number=3000,
-#                     globals={'key':key}))
+print(timeit.timeit("f()",
+                    setup="from __main__ import jac_with_jax;"
+                          "import jax;"
+                          "f=jax.jit(jac_with_jax);"
+                          "f()",
+                    number=3000, globals={'key':key}))
+print(timeit.timeit("f()",
+                    setup="from __main__ import jac_analytical;"
+                          "import jax;"
+                          "f=jax.jit(jac_analytical);"
+                          "f()",
+                    number=3000,
+                    globals={'key':key}))
 
-mjx_data = mjx.fwd_actuation(mjx_model, mjx_data)
-qfrc = mjx_data.qfrc_actuator
-
-@jax.jit
-def pinv_solve(jac=jac1, qfrc=qfrc):
-  return jax.numpy.linalg.pinv(jac)@qfrc
-
-@jax.jit
-def lststq_solve(jac=jac1, qfrc=qfrc):
-  return jax.numpy.linalg.lstsq(jac, qfrc)
-
-print(timeit.timeit("pinv_solve()", setup="from __main__ import pinv_solve; pinv_solve()", number=10000, globals={'key':key}))
-print(timeit.timeit("lststq_solve()", setup="from __main__ import lststq_solve; lststq_solve()", number=10000, globals={'key':key}))
+# mjx_data = mjx.fwd_actuation(mjx_model, mjx_data)
+# qfrc = mjx_data.qfrc_actuator
+#
+# @jax.jit
+# def pinv_solve(jac=jac1, qfrc=qfrc):
+#   return jax.numpy.linalg.pinv(jac)@qfrc
+#
+# @jax.jit
+# def lststq_solve(jac=jac1, qfrc=qfrc):
+#   return jax.numpy.linalg.lstsq(jac, qfrc)
+#
+# print(timeit.timeit("pinv_solve()", setup="from __main__ import pinv_solve; pinv_solve()", number=10000, globals={'key':key}))
+# print(timeit.timeit("lststq_solve()", setup="from __main__ import lststq_solve; lststq_solve()", number=10000, globals={'key':key}))
