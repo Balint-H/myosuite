@@ -1,3 +1,5 @@
+from brax.training import networks, types
+from brax.training.types import Params, PRNGKey
 from flax import struct
 from datetime import datetime
 from typing import Any, Dict, Optional, Union, Callable, Tuple, NamedTuple
@@ -21,7 +23,7 @@ class HierarchicalEnv(mjx_env.MjxEnv, abc.ABC):
 
   @property
   @abc.abstractmethod
-  def high_level_action_size(self) -> int:
+  def hl_action_size(self) -> int:
     """Returns the size of the high-level action space (e.g., target angle)."""
 
 
@@ -51,15 +53,19 @@ class HierarchicalBraxDomainRandomizationVmapWrapper(BraxDomainRandomizationVmap
     env.unwrapped._mjx_model = mjx_model
     return env
 
-  def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-    def high_level_step(mjx_model, s, a):
+  def hl_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+    def _hl_step(mjx_model, s, a):
       env = self._env_fn(mjx_model=mjx_model)
       return env.hl_step(s, a)
 
-    res = jax.vmap(high_level_step, in_axes=[self._in_axes, 0, 0])(
+    res = jax.vmap(_hl_step, in_axes=[self._in_axes, 0, 0])(
         self._mjx_model_v, state, action
     )
     return res
+
+  @property
+  def hl_action_size(self) -> int:
+    return self.env.hl_action_size
 
 
 class HierarchicalVmapWrapper(brax_training.VmapWrapper):
@@ -69,8 +75,12 @@ class HierarchicalVmapWrapper(brax_training.VmapWrapper):
     self.env: HierarchicalEnv = env
     super().__init__(env, batch_size)
 
-  def high_level_step(self, state: State, action: jax.Array) -> State:
+  def hl_step(self, state: State, action: jax.Array) -> State:
     return jax.vmap(self.env.hl_step)(state, action)
+
+  @property
+  def hl_action_size(self) -> int:
+    return self.env.hl_action_size
 
 
 class HierarchicalEpisodeWrapper(brax_training.EpisodeWrapper):
@@ -79,13 +89,21 @@ class HierarchicalEpisodeWrapper(brax_training.EpisodeWrapper):
     self.env: HierarchicalEnv = env
     super().__init__(env, episode_length, action_repeat)
 
-  def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+  def hl_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
     return self.env.hl_step(state, action)
+
+  @property
+  def hl_action_size(self) -> int:
+    return self.env.hl_action_size
 
 
 class HierarchicalBraxAutoResetWrapper(BraxAutoResetWrapper):
-  def high_level_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+  def hl_step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
     return self.env.hl_step(state, action)
+
+  @property
+  def hl_action_size(self) -> int:
+    return self.env.hl_action_size
 
 
 def wrap_for_hierarchical_brax_training(
@@ -123,3 +141,20 @@ def wrap_for_hierarchical_brax_training(
   return env
 
 
+def make_ll_inference_fn(network: networks.FeedForwardNetwork):
+  # TODO: Should we keep format to support stochastic inference?
+  def make_ll_policy(
+      params: Params, deterministic: bool = True
+  ) -> types.Policy:
+
+    def ll_policy(
+        observations: types.Observation, key_sample: PRNGKey
+    ) -> Tuple[types.Action, types.Extra]:
+      param_subset = (params[0], params[1])  # normalizer and policy params
+      logits = network.apply(*param_subset, observations)
+
+      return logits, {}
+
+    return ll_policy
+
+  return make_ll_policy

@@ -49,7 +49,6 @@ def default_config() -> config_dict.ConfigDict:
       discounting=0.97,
       gae_lambda=0.95,
       max_grad_norm=1.0,
-
     ),
     normalize_observations=True,
     action_repeat=1,
@@ -62,16 +61,21 @@ def default_config() -> config_dict.ConfigDict:
     hl_network_factory=config_dict.create(
       policy_hidden_layer_sizes=(512, 256, 128),
       value_hidden_layer_sizes=(512, 256, 128),
-      policy_obs_key="state",
-      value_obs_key="privileged_state",
+      policy_obs_key="hl_obs",
+      value_obs_key="hl_obs",
     ),
     ll_network_factory=config_dict.create(
-      policy_hidden_layer_sizes=(512, 256, 128),
-      policy_obs_key="state",
+      hidden_layer_sizes=(512, 256, 128),
+      obs_key="ll_obs",
+    ),
+    ll_learning_config=config_dict.create(
+      ll_opt_max_grad_norm=1,
+      learning_rate=3e-4
     )
 
   )
-  env_config["ppo_config"] = rl_config
+
+  env_config["rl_config"] = rl_config
   return env_config
 
 
@@ -79,12 +83,12 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
   """Hierarchical elbow environment with internal PD + HL modulation."""
 
   def __init__(
-          self,
-          config: config_dict.ConfigDict = default_config(),
-          config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
-          is_msk=True,
-          xml_path: Optional[str] = None,  # Allow passing xml path
-          reference_trajectory: Optional[Tuple[jp.ndarray, jp.ndarray]] = None  # Allow passing trajectory
+      self,
+      config: config_dict.ConfigDict = default_config(),
+      config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+      is_msk=True,
+      xml_path: Optional[str] = None,  # Allow passing xml path
+      reference_trajectory: Optional[Tuple[jp.ndarray, jp.ndarray]] = None  # Allow passing trajectory
   ) -> None:
     super().__init__(config, config_overrides)
     xml_path = (rf"../../assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
@@ -217,7 +221,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
     # --- Calculate HL Reward ---
     ctrl_cost = (self._config.reward_config.ctrl_cost_weight
-                 * jp.sum(jp.square(state.obs['ll_obs']['desired_torque'])) / self.mjx_model.nv)
+                 * jp.sum(jp.square(state.info['desired_torque'] )) / self.mjx_model.nv)
 
     state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
     qpos_ref_t = self._qpos_ref[state.info['ref_time_idx']]
@@ -249,26 +253,23 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     ref_qpos = info.get('ref_qpos', jp.zeros_like(data.qpos))  # Get ref info if available
     ref_qvel = info.get('ref_qvel', jp.zeros_like(data.qvel))
     return jp.concatenate([
-      data.qpos,
-      data.qvel,
-      ref_qpos,  # Include reference state
-      ref_qvel
-    ])
+        data.qpos,
+        data.qvel,
+        ref_qpos,  # Include reference state
+        ref_qvel
+      ])
 
   def _get_ll_obs(self, data, info):
-    return {**self._get_ll_obs_base(data), 'desired_torque': info['desired_torque']}
+    return jp.concatenate([self._get_ll_obs_base(data), info['desired_torque']])
 
-  def _get_ll_obs_base(self, data: mjx.Data) -> Dict[str, jp.ndarray]:
+  def _get_ll_obs_base(self, data: mjx.Data) -> jp.ndarray:
     """Get base state observations for the low-level policy (before desired_torque)."""
     # Example: proprioceptive info relevant for muscle control
-    return {
-      'state': jp.concatenate([
+    return jp.concatenate([
         data.ctrl,
         data.actuator_length,
         data.actuator_velocity,
       ])
-      # Add other necessary keys if ll_network expects them
-    }
 
   # TODO needs to be completely redone
   def calculate_torque_activation_jacobian(self, data: mjx.Data) -> jp.ndarray:
@@ -298,9 +299,8 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     return self._mjx_model.nu
 
   @property
-  def high_level_action_size(self) -> int:
+  def hl_action_size(self) -> int:
     """Returns the size of the high-level action space (modulation)."""
-    # Assuming modulation has same dim as DoFs
     return self.mjx_model.nv
 
   @property

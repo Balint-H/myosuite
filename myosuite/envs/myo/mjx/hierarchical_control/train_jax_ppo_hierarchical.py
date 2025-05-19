@@ -24,6 +24,7 @@ import pickle
 import h5py
 
 import jax
+import optax
 
 from absl import app
 from absl import flags
@@ -44,7 +45,7 @@ import wandb
 
 import mujoco_playground
 from mujoco_playground import registry
-from mujoco_playground import wrapper
+from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn
 from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
@@ -159,11 +160,10 @@ def main(argv):
   del argv
   print(f"Current backend: {jax.default_backend()}")
   registry.locomotion.register_environment("MyoElbow", HierarchicalPlaygroundElbow, default_config)
-  registry.locomotion.ALL.append("MyoElbow")
   # Load environment configuration
   env_cfg = default_config()
 
-  ppo_params = env_cfg.ppo_config
+  ppo_params = env_cfg.rl_config
 
   if _NUM_TIMESTEPS.present:
     ppo_params.num_timesteps = _NUM_TIMESTEPS.value
@@ -273,7 +273,7 @@ def main(argv):
   def policy_params_fn(current_step, make_policy, params, suffix="_hl"):  # pylint: disable=unused-argument
     orbax_checkpointer = ocp.PyTreeCheckpointer()
     save_args = orbax_utils.save_args_from_target(params)
-    path = ckpt_path / f"{current_step}"
+    path = ckpt_path / f"{current_step}{suffix}"
     orbax_checkpointer.save(path, params, force=True, save_args=save_args)
 
   training_params = dict(ppo_params)
@@ -282,6 +282,9 @@ def main(argv):
 
   if "ll_network_factory" in training_params:
     del training_params["ll_network_factory"]
+
+  if "ll_learning_config" in training_params:
+    del training_params["ll_learning_config"]
 
   hl_network_fn = (
       ppo_networks.make_ppo_networks
@@ -320,17 +323,27 @@ def main(argv):
   if "num_eval_envs" in training_params:
     del training_params["num_eval_envs"]
 
+  training_params["ll_optimizer"] = optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate),
+  if env_cfg.rl_config.ll_learning_config.ll_opt_max_grad_norm is not None:
+    # TODO: Move gradient clipping to `training/gradients.py`.
+    training_params["ll_optimizer"] = optax.chain(
+        optax.clip_by_global_norm(env_cfg.rl_config.ll_learning_config.ll_opt_max_grad_norm),
+        optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate),
+    )
+
   train_fn = functools.partial(
       hierarchical_ppo.train,
       **training_params,
+      make_ll_inference_fn=make_ll_inference_fn,
       hl_network_factory=hl_network_factory,
       ll_network_factory=ll_network_factory,
       ll_loss_fn=hierarchical_ll_loss,
       hl_policy_params_fn=functools.partial(policy_params_fn, suffix="_hl"),
       ll_policy_params_fn=functools.partial(policy_params_fn, suffix="_ll"),
       seed=_SEED.value,
-      restore_checkpoint_path=restore_checkpoint_path,
-      wrap_env_fn= wrapper.wrap_for_brax_training,
+      hl_restore_checkpoint_path=restore_checkpoint_path+"_hl" if restore_checkpoint_path is not None else None,
+      ll_restore_checkpoint_path=restore_checkpoint_path+"_ll" if restore_checkpoint_path is not None else None,
+      wrap_env_fn=wrap_for_hierarchical_brax_training,
       num_eval_envs=num_eval_envs,
   )
 

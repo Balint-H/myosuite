@@ -437,7 +437,7 @@ def train(
 
   # region Set up HL policy
   hl_ppo_network = hl_network_factory(
-      obs_shape, env.action_size, preprocess_observations_fn=normalize
+      obs_shape, env.hl_action_size, preprocess_observations_fn=normalize
   )
   make_hl_policy = ppo_networks.make_inference_fn(hl_ppo_network)
   hl_optimizer = optax.adam(learning_rate=hl_ppo_learning_config.learning_rate)
@@ -451,7 +451,7 @@ def train(
 
   # region Set up LL policy
   ll_network = ll_network_factory(
-      obs_shape, env.action_size, preprocess_observations_fn=normalize
+      env.action_size, obs_shape,  preprocess_observations_fn=normalize
   )
   make_ll_policy = make_ll_inference_fn(ll_network)
   # endregion
@@ -714,7 +714,7 @@ def train(
       env_steps=0,
   )
 
-  ll_init_params = ll_network.policy_network.init(key_policy)
+  ll_init_params = ll_network.init(key_policy)
 
   ll_training_state = LLTrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
       optimizer_state=ll_optimizer.init(ll_init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
@@ -823,8 +823,7 @@ def train(
         )),
         _unpmap((
             ll_training_state.normalizer_params,
-            ll_training_state.params.policy,
-            ll_training_state.params.value,
+            ll_training_state.params
         )),
         training_metrics={},
     )

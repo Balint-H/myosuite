@@ -41,16 +41,16 @@ def actor_step(
 ) -> Tuple[State, Transition, LLSupervisedData]:
   """Collect data."""
   hl_key, ll_key, n_key = jax.random.split(key,3)
-  hl_actions, hl_policy_extras = hl_policy(env_state.obs["hl_obs"], hl_key)
+  hl_actions, hl_policy_extras = hl_policy(env_state.obs, hl_key)
   mid_state = env.hl_step(env_state, hl_actions)
-  actions, ll_policy_extras = ll_policy(mid_state.obs['ll_obs'], ll_key)
+  actions, ll_policy_extras = ll_policy(mid_state.obs, ll_key)
 
   nstate = env.step(mid_state, actions)
 
   state_extras = {x: nstate.info[x] for x in extra_fields}
   return (nstate,
           Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
-            observation=env_state.obs["hl_obs"],
+            observation=env_state.obs,
             action=hl_actions,
             reward=nstate.reward,
             discount=1 - nstate.done,
@@ -59,12 +59,12 @@ def actor_step(
                     'state_extras': state_extras},
           ),
           LLSupervisedData(
-            ll_obs= mid_state.obs['ll_obs'],
-            ctrl= actions,
-            desired_torque= mid_state.obs['ll_obs']['desired_torque'],
-            actual_torque= nstate['info']['actual_torque'],
+            ll_obs= mid_state.obs,
+            activation_designated= actions,
+            hl_desired_torque= mid_state.info['desired_torque'],
+            torque_designated= nstate.info['actual_torque'],
             # Pre-computed Jacobian: d(torque)/d(act)
-            jacobian= nstate['info']['jac_torque_act']
+            jacobian= nstate.info['jac_torque_act']
             )
           )
 
