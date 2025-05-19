@@ -28,8 +28,10 @@ import jax
 from absl import app
 from absl import flags
 from absl import logging
+from brax.training import networks
 from brax.training.agents.ppo import networks as ppo_networks
 import train_hierarchical as hierarchical_ppo
+from train_hierarchical import PPOLearningParams
 from etils import epath
 from flax.training import orbax_utils
 
@@ -48,6 +50,7 @@ from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
 from playground_elbow_hierarchical import HierarchicalPlaygroundElbow, default_config
+from loss_hierarchical import hierarchical_ll_loss
 
 
 # xla_flags = os.environ.get("XLA_FLAGS", "")
@@ -267,25 +270,42 @@ def main(argv):
     json.dump(env_cfg.to_dict(), fp, indent=4)
 
   # Define policy parameters function for saving checkpoints
-  def policy_params_fn(current_step, make_policy, params):  # pylint: disable=unused-argument
+  def policy_params_fn(current_step, make_policy, params, suffix="_hl"):  # pylint: disable=unused-argument
     orbax_checkpointer = ocp.PyTreeCheckpointer()
     save_args = orbax_utils.save_args_from_target(params)
     path = ckpt_path / f"{current_step}"
     orbax_checkpointer.save(path, params, force=True, save_args=save_args)
 
   training_params = dict(ppo_params)
-  if "network_factory" in training_params:
-    del training_params["network_factory"]
+  if "hl_network_factory" in training_params:
+    del training_params["hl_network_factory"]
 
-  network_fn = (
+  if "ll_network_factory" in training_params:
+    del training_params["ll_network_factory"]
+
+  hl_network_fn = (
       ppo_networks.make_ppo_networks
   )
-  if hasattr(ppo_params, "network_factory"):
-    network_factory = functools.partial(
-        network_fn, **ppo_params.network_factory
+
+  ll_network_fn = (
+    networks.make_policy_network
+  )
+
+  if hasattr(ppo_params, "hl_network_factory"):
+    hl_network_factory = functools.partial(
+        hl_network_fn, **ppo_params.hl_network_factory
     )
   else:
-    network_factory = network_fn
+    hl_network_factory = hl_network_fn
+
+  if hasattr(ppo_params, "ll_network_factory"):
+    ll_network_factory = functools.partial(
+        ll_network_fn, **ppo_params.ll_network_factory
+    )
+  else:
+    ll_network_factory = ll_network_fn
+
+  training_params['hl_ppo_learning_config'] = PPOLearningParams(**training_params['hl_ppo_learning_config'])
 
   if _DOMAIN_RANDOMIZATION.value:
     training_params["randomization_fn"] = registry.get_domain_randomizer(
@@ -303,8 +323,11 @@ def main(argv):
   train_fn = functools.partial(
       hierarchical_ppo.train,
       **training_params,
-      network_factory=network_factory,
-      policy_params_fn=policy_params_fn,
+      hl_network_factory=hl_network_factory,
+      ll_network_factory=ll_network_factory,
+      ll_loss_fn=hierarchical_ll_loss,
+      hl_policy_params_fn=functools.partial(policy_params_fn, suffix="_hl"),
+      ll_policy_params_fn=functools.partial(policy_params_fn, suffix="_ll"),
       seed=_SEED.value,
       restore_checkpoint_path=restore_checkpoint_path,
       wrap_env_fn= wrapper.wrap_for_brax_training,
