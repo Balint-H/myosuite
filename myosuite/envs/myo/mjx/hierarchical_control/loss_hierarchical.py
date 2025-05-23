@@ -39,20 +39,23 @@ def hierarchical_ll_loss_head(
     hl_torque_error
   )
 
-  hl_torque_loss = 0.5*(hl_torque_error_flat*hl_torque_error_flat).sum(axis=0).mean()
+  hl_torque_loss = 0.5*(hl_torque_error_flat*hl_torque_error_flat).sum(axis=1).mean()
   return hl_torque_loss, {
       'torque_loss': hl_torque_loss,
       'torque_error': hl_torque_error
   }
+
 
 def hierarchical_ll_loss_fwd(logits, data: LLSupervisedData):
   loss, aux = hierarchical_ll_loss_head(logits, data)
 
   return (loss, aux), (data.jacobian, aux['torque_error'])
 
+
 def hierarchical_ll_loss_bwd(res, g):
-  running_grads = jax.vmap((lambda j, e: e@j.T), in_axes=[0, 1], out_axes=[0, 1])(res[0], res[1])
-  return (running_grads*g[0], None)
+  # g is df/dL where f is the function being diffed. If L is diffed, then f=L and g should be [1].
+  running_grads = jax.vmap(jax.vmap((lambda j, e: e@j), in_axes=0, out_axes=0), in_axes=1, out_axes=1)(res[0], res[1])
+  return running_grads*g[0], None
 
 
 hierarchical_ll_loss_head.defvjp(hierarchical_ll_loss_fwd, hierarchical_ll_loss_bwd)

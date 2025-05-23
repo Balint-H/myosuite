@@ -31,8 +31,8 @@ from absl import flags
 from absl import logging
 from brax.training import networks
 from brax.training.agents.ppo import networks as ppo_networks
-import train_hierarchical as hierarchical_ppo
-from train_hierarchical import PPOLearningParams
+import train_hierarchical_debug as hierarchical_ppo
+from train_hierarchical_debug import PPOLearningParams
 from etils import epath
 from flax.training import orbax_utils
 
@@ -45,13 +45,14 @@ import wandb
 
 import mujoco_playground
 from mujoco_playground import registry
-from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn
+from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn, wrap_for_hierarchical_brax_debug
 from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
 from playground_elbow_hierarchical import HierarchicalPlaygroundElbow, default_config
 from loss_hierarchical import hierarchical_ll_loss
+
 
 # xla_flags = os.environ.get("XLA_FLAGS", "")
 # xla_flags += " --xla_gpu_triton_gemm_any=True"
@@ -343,7 +344,7 @@ def main(argv):
       seed=_SEED.value,
       hl_restore_checkpoint_path=restore_checkpoint_path+"_hl" if restore_checkpoint_path is not None else None,
       ll_restore_checkpoint_path=restore_checkpoint_path+"_ll" if restore_checkpoint_path is not None else None,
-      wrap_env_fn=wrap_for_hierarchical_brax_training,
+      wrap_env_fn=wrap_for_hierarchical_brax_debug,
       num_eval_envs=num_eval_envs,
   )
 

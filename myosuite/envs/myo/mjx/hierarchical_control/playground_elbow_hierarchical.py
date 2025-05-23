@@ -1,24 +1,19 @@
-from datetime import datetime
 from typing import Any, Dict, Optional, Union, Tuple
-
-from etils import epath
 import jax
 import jax.numpy as jp
 from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
 from mujoco_playground import State
-from hierarchical_env import HierarchicalEnv
+from hierarchical_env import HierarchicalEnv, LLSupervisedData
 from mujoco_playground._src import mjx_env
-from train_hierarchical import PPOLearningParams
-from loss_hierarchical import hierarchical_ll_loss
 
 
 def default_config() -> config_dict.ConfigDict:
   env_config = config_dict.create(
     ctrl_dt=0.02,
     sim_dt=0.002,
-    episode_length=1000,
+    episode_length=100,
     action_repeat=1,
     action_scale=0.5,
     history_len=1,
@@ -38,7 +33,7 @@ def default_config() -> config_dict.ConfigDict:
   )
 
   rl_config = config_dict.create(
-    num_timesteps=100_000_000,
+    num_timesteps=819_200,
     num_evals=10,
     episode_length=env_config.episode_length,
     hl_ppo_learning_config=config_dict.create(
@@ -220,7 +215,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     jac_torque_act = self.calculate_torque_activation_jacobian(data)
 
     # --- Calculate HL Reward ---
-    ctrl_cost = (self._config.reward_config.ctrl_cost_weight
+    ctrl_cost = (self._config.reward_config.ctrl_cost_weight  # TODO axis for sum?
                  * jp.sum(jp.square(state.info['desired_torque'] )) / self.mjx_model.nv)
 
     state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
@@ -229,7 +224,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     angle_error = qpos_ref_t - next_data.qpos
     angle_reward = jp.exp(-self._config.reward_config.angle_reward_weight
                           * jp.sum(jp.square(angle_error)) / self.mjx_model.nv)
-    reward = angle_reward - ctrl_cost
+    reward = angle_reward # TODO - ctrl_cost
 
     # Prepare next observations for HL controller
     next_info_for_obs = {'ref_qpos': self._qpos_ref[(state.info['ref_time_idx'] + 1) % self._ref_traj_len]}
@@ -271,7 +266,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
         data.actuator_velocity,
       ])
 
-  # TODO needs to be completely redone
+
   def calculate_torque_activation_jacobian(self, data: mjx.Data) -> jp.ndarray:
     """Calculates d(torque)/d(act) analytically."""
     gains = mjx._src.scan.flat(
@@ -318,7 +313,54 @@ if __name__ == '__main__':
   jit_reset = jax.jit(env.reset)
   jit_hl_step = jax.jit(env.hl_step)
   rng = jax.random.key(0)
-  state = jit_reset(rng)
+  rng = jp.array([1708187461, 2772610763], dtype=jp.uint32)
+
+  state = env.reset(rng)
   state = jit_hl_step(state, jp.array([0.0]))
   state = jit_step(state, jp.zeros(6))
+
+  ll_data = LLSupervisedData(
+    ll_obs=state.obs,
+    activation_designated=jp.zeros(6),
+    hl_desired_torque=state.info['desired_torque'],
+    torque_designated=state.info['actual_torque'],
+    # Pre-computed Jacobian: d(torque)/d(act)
+    jacobian=state.info['jac_torque_act']
+  )
+
+  def dummy_batch(arr):
+    return jp.repeat(jp.repeat(arr[None, None, ...], 256, 0), 20, 1)
+
+  ll_data = jax.tree_util.tree_map(dummy_batch, ll_data)
+
+  from loss_hierarchical import hierarchical_ll_loss
+  import functools
+  from brax.training import networks
+  from brax.training.acme import running_statistics, types
+
+  d_loss = jax.jacrev(hierarchical_ll_loss, has_aux=True)
+
+
+  ll_network_fn = (
+    networks.make_policy_network
+  )
+
+  ll_network_factory = functools.partial(
+    ll_network_fn, **default_config().rl_config.ll_network_factory
+  )
+
+  obs_shape = jax.tree_util.tree_map(lambda x: x.shape, state.obs)
+
+  ll_network = ll_network_factory(
+    env.action_size, obs_shape, preprocess_observations_fn=running_statistics.normalize
+  )
+
+  obs_shape = jax.tree_util.tree_map(  # TODO: check if we need sub obs shapes?
+    lambda x: jp.array(x.shape, jp.dtype('float32')), state.obs
+  )
+  params = ll_network.init(jax.random.PRNGKey(0))
+  normalizer_params = running_statistics.init_state(obs_shape)
+
+  grads = d_loss(params, normalizer_params, ll_data, ll_network)
   pass
+

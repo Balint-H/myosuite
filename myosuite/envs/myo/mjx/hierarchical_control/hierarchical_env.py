@@ -1,8 +1,9 @@
 from brax.training import networks, types
+from brax.training.networks import ActivationFn, Initializer, FeedForwardNetwork, MLP, _get_obs_state_size
 from brax.training.types import Params, PRNGKey
-from flax import struct
+from flax import struct, linen
 from datetime import datetime
-from typing import Any, Dict, Optional, Union, Callable, Tuple, NamedTuple
+from typing import Any, Dict, Optional, Union, Callable, Tuple, NamedTuple, Sequence
 from brax.envs.wrappers import training as brax_training
 from etils import epath
 import jax
@@ -141,6 +142,20 @@ def wrap_for_hierarchical_brax_training(
   return env
 
 
+def wrap_for_hierarchical_brax_debug(
+    env: mjx_env.MjxEnv,
+    num_vision_envs: int = 1,
+    episode_length: int = 1000,
+    action_repeat: int = 1,
+    randomization_fn: Optional[
+        Callable[[mjx.Model], Tuple[mjx.Model, mjx.Model]]
+    ] = None,
+) -> Wrapper:
+  env = HierarchicalEpisodeWrapper(env, episode_length, action_repeat)
+  env = HierarchicalBraxAutoResetWrapper(env)
+  return env
+
+
 def make_ll_inference_fn(network: networks.FeedForwardNetwork):
   # TODO: Should we keep format to support stochastic inference?
   def make_ll_policy(
@@ -158,3 +173,35 @@ def make_ll_inference_fn(network: networks.FeedForwardNetwork):
     return ll_policy
 
   return make_ll_policy
+
+
+
+def make_ll_network(
+    param_size: int,
+    obs_size: types.ObservationSize,
+    preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
+    hidden_layer_sizes: Sequence[int] = (256, 256),
+    activation: ActivationFn = linen.relu,
+    kernel_init: Initializer = jax.nn.initializers.lecun_uniform(),
+    layer_norm: bool = False,
+    obs_key: str = 'state',
+) -> FeedForwardNetwork:
+  """Creates a policy network with 0-1 outputs with a sigmoid activation."""
+  policy_module = MLP(
+      layer_sizes=list(hidden_layer_sizes) + [param_size],
+      activation=activation,
+      kernel_init=kernel_init,
+      layer_norm=layer_norm,
+  )
+
+  def apply(processor_params, policy_params, obs):
+    obs = preprocess_observations_fn(obs, processor_params)
+    obs = obs if isinstance(obs, jax.Array) else obs[obs_key]
+    logits = policy_module.apply(policy_params, obs)
+    return linen.sigmoid(logits)
+
+  obs_size = _get_obs_state_size(obs_size, obs_key)
+  dummy_obs = jp.zeros((1, obs_size))
+  return FeedForwardNetwork(
+      init=lambda key: policy_module.init(key, dummy_obs), apply=apply
+  )

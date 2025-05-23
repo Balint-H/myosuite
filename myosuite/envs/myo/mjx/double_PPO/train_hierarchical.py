@@ -616,9 +616,9 @@ def train(
           unroll_length,
           extra_fields=('truncation', 'episode_metrics', 'episode_done'),
       )
-      return (next_state, next_key), hl_data, ll_data
+      return (next_state, next_key), (hl_data, ll_data)
 
-    (state, _), hl_data, ll_data = jax.lax.scan(
+    (state, _), (hl_data, ll_data) = jax.lax.scan(
         f,
         (state, key_generate_unroll),
         (),

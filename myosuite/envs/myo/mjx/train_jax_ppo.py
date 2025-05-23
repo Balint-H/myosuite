@@ -13,7 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Train a PPO agent using JAX on the specified environment."""
-
 from datetime import datetime
 import functools
 import json
@@ -160,11 +159,10 @@ def get_rl_config(env_name: str) -> config_dict.ConfigDict:
 def main(argv):
   """Run training and evaluation for the specified environment."""
 
-
   del argv
   print(f"Current backend: {jax.default_backend()}")
   registry.locomotion.register_environment("MyoElbow", PlaygroundElbow, default_config)
-  registry.locomotion.ALL.append("MyoElbow")
+
   # Load environment configuration
   env_cfg = default_config()
 

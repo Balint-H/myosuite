@@ -420,14 +420,11 @@ def train(
       wrap_env_fn,
       randomization_fn,
   )
-  reset_fn = jax.jit(jax.vmap(env.reset))
-  key_envs = jax.random.split(key_env, num_envs // process_count)
-  key_envs = jnp.reshape(
-      key_envs, (local_devices_to_use, -1) + key_envs.shape[1:]
-  )
-  env_state = reset_fn(key_envs)
+  reset_fn = env.reset
+
+  env_state = reset_fn(key_env)
   # Discard the batch axes over devices and envs.
-  obs_shape = jax.tree_util.tree_map(lambda x: x.shape[2:], env_state.obs)
+  obs_shape = jax.tree_util.tree_map(lambda x: x.shape, env_state.obs)
   # endregion
 
   # region HL and LL policy makers
@@ -511,25 +508,35 @@ def train(
       hl_normalizer_params: running_statistics.RunningStatisticsState,
       ll_normalizer_params: running_statistics.RunningStatisticsState,
   ):
+    def _fake_batch(v):
+      return jax.tree_util.tree_map(lambda x: x[None, ...], v)
     (hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key = carry
+    data_tuple = _fake_batch(data_tuple)
     hl_data, ll_data = data_tuple
     key, key_hl_loss, key_ll_loss = jax.random.split(key, 3)
-    (_, metrics), hl_params, hl_optimizer_state = hl_gradient_update_fn(
-        hl_params,
-        hl_normalizer_params,
-        hl_data,
-        key_hl_loss,
-        optimizer_state=hl_optimizer_state,
-    )
 
-    (_, _), ll_params, ll_optimizer_state = ll_gradient_update_fn(
-        ll_params,
-        ll_normalizer_params,
-        ll_data,
-        optimizer_state=ll_optimizer_state,
-    )
+    def grad_update(loss_fn, optimizer, optimizer_state, *args):
+      val, grads = jax.value_and_grad(loss_fn, has_aux=True)(*args)
+      params_update, optimizer_state = optimizer.update(grads, optimizer_state)
+      params = optax.apply_updates(args[0], params_update)
+      return params
 
-    return ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key), metrics
+    hl_params = grad_update(hl_loss_fn,
+                hl_optimizer,
+                hl_optimizer_state,
+          hl_params,
+                hl_normalizer_params,
+                hl_data,
+                key_hl_loss)
+
+    ll_params = grad_update(ll_loss_fn,
+                ll_optimizer,
+                ll_optimizer_state,
+                ll_params,
+                ll_normalizer_params,
+                ll_data)
+
+    return 0
 
   def hierarchy_sgd_step(
       carry,
@@ -542,21 +549,11 @@ def train(
     hl_data, ll_data = data_tuple
     key, key_perm, key_grad = jax.random.split(key, 3)
 
-    def convert_data(x: jnp.ndarray):  # TODO: Consider if we want the same shuffle for the two datas like this
-      x = jax.random.permutation(key_perm, x)
-      x = jnp.reshape(x, (num_minibatches, -1) + x.shape[1:])
-      return x
-
-    shuffled_hl_data = jax.tree_util.tree_map(convert_data, hl_data)
-    shuffled_ll_data = jax.tree_util.tree_map(convert_data, ll_data)
-    ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), _), metrics = jax.lax.scan(
-        functools.partial(hierarchy_minibatch_step,
+    hierarchy_minibatch_step(((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key_grad),
+                             (hl_data, ll_data),
                           hl_normalizer_params=hl_normalizer_params,
-                          ll_normalizer_params=ll_normalizer_params),
-        ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key_grad),
-        (shuffled_hl_data, shuffled_ll_data),
-        length=num_minibatches,
-    )
+                          ll_normalizer_params=ll_normalizer_params)
+
     return ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key), metrics
 
   def hierarchy_training_step(
@@ -666,7 +663,7 @@ def train(
     loss_metrics = jax.tree_util.tree_map(jnp.mean, loss_metrics)
     return (hl_training_state, ll_training_state), state, loss_metrics
 
-  training_epoch = jax.pmap(training_epoch, axis_name=_PMAP_AXIS_NAME)
+  #training_epoch = jax.pmap(training_epoch, axis_name=_PMAP_AXIS_NAME)
 
   # Note that this is NOT a pure jittable method.
   def hierarchy_training_epoch_with_timing(
@@ -785,13 +782,13 @@ def train(
   # endregion
 
   # region Move training states to GPU
-  hl_training_state = jax.device_put_replicated(
-      hl_training_state, jax.local_devices()[:local_devices_to_use]
-  )
-
-  ll_training_state = jax.device_put_replicated(
-      ll_training_state, jax.local_devices()[:local_devices_to_use]
-  )
+  # hl_training_state = jax.device_put_replicated(
+  #     hl_training_state, jax.local_devices()[:local_devices_to_use]
+  # )
+  #
+  # ll_training_state = jax.device_put_replicated(
+  #     ll_training_state, jax.local_devices()[:local_devices_to_use]
+  # )
   # endregion
 
   eval_env = _maybe_wrap_env(
@@ -816,6 +813,42 @@ def train(
   )
 
   # region Run initial eval
+
+  hl_policy = make_hl_policy((
+    hl_training_state.normalizer_params,
+    hl_training_state.params.policy,
+    hl_training_state.params.value,
+  ))
+
+  ll_policy = make_ll_policy((
+    ll_training_state.normalizer_params,
+    ll_training_state.params,
+  ))
+
+  def f(carry, unused_t):
+    current_state, current_key = carry
+    current_key, next_key = jax.random.split(current_key)
+    next_state, hl_data, ll_data = acting_hierarchical.generate_unroll(
+      env,
+      current_state,
+      hl_policy,
+      ll_policy,
+      current_key,
+      unroll_length,
+      extra_fields=('truncation', 'episode_metrics', 'episode_done'),
+    )
+    return (next_state, next_key), (hl_data, ll_data)
+
+  (state, _), (hl_data, ll_data) = f((env_state, key_env), ())
+
+  res = hierarchy_sgd_step(((hl_training_state.optimizer_state, ll_training_state.optimizer_state),
+                            (hl_training_state.params, ll_training_state.params), key_env),
+                           (),
+                           data_tuple=(hl_data, ll_data),
+                           hl_normalizer_params=hl_training_state.normalizer_params,
+                           ll_normalizer_params=ll_training_state.normalizer_params)
+
+
   metrics = {}
   if process_id == 0 and num_evals > 1:
     metrics = evaluator.run_evaluation(

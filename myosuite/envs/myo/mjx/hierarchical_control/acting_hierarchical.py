@@ -87,9 +87,9 @@ def generate_unroll(
     nstate, hl_transition, ll_transition = actor_step(
         env, state, hl_policy, ll_policy, current_key, extra_fields=extra_fields
     )
-    return (nstate, next_key), hl_transition, ll_transition
+    return (nstate, next_key), (hl_transition, ll_transition)
 
-  (final_state, _), hl_data, ll_data = jax.lax.scan(
+  (final_state, _), (hl_data, ll_data) = jax.lax.scan(
       f, (env_state, key), (), length=unroll_length
   )
   return final_state, hl_data, ll_data
