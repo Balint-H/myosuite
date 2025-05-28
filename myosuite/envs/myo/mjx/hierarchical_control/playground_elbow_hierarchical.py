@@ -11,63 +11,63 @@ from mujoco_playground._src import mjx_env
 
 def default_config() -> config_dict.ConfigDict:
   env_config = config_dict.create(
-    ctrl_dt=0.02,
+    ctrl_dt=0.002,
     sim_dt=0.002,
-    episode_length=100,
+    episode_length=300,
     action_repeat=1,
     action_scale=0.5,
     history_len=1,
     healthy_angle_range=(0, 2.1),
-    pd_config=config_dict.create(kp=1, kd=1),
     noise_config=config_dict.create(
       reset_noise_scale=1e-1,
     ),
     reward_config=config_dict.create(
-      angle_reward_weight=2.5,
-      ctrl_cost_weight=0.1,
+      angle_reward_weight=5,
+      angle_reward_scale=2.5,
+      ctrl_cost_weight=0.5,
+      ctrl_cost_scale=0.01,
     ),
     pd_gains=config_dict.create(
-      kp=100,
-      kd=1
+      kp=4,
+      kd=0.05
     )
   )
 
   rl_config = config_dict.create(
-    num_timesteps=819_200,
-    num_evals=10,
+    num_timesteps=100_000_000,
+    num_evals=16,
     episode_length=env_config.episode_length,
     hl_ppo_learning_config=config_dict.create(
       reward_scaling=1.0,
-      clipping_epsilon=0.2,
-      learning_rate=3e-4,
-      entropy_cost=0.005,
-      discounting=0.97,
+      clipping_epsilon=0.1,
+      learning_rate=5e-5,
+      entropy_cost=0.002,
+      discounting=0.98,
       gae_lambda=0.95,
       max_grad_norm=1.0,
     ),
     normalize_observations=True,
-    action_repeat=1,
-    unroll_length=20,
-    num_minibatches=32,
-    num_updates_per_batch=4,
+    action_repeat=env_config.action_repeat,
+    unroll_length=60,
+    num_minibatches=64,
+    num_updates_per_batch=2,
     num_resets_per_eval=1,
     num_envs=8192,
-    batch_size=256,
+    batch_size=128,
     hl_network_factory=config_dict.create(
-      policy_hidden_layer_sizes=(512, 256, 128),
-      value_hidden_layer_sizes=(512, 256, 128),
+      policy_hidden_layer_sizes=(128, 64, 32),
+      value_hidden_layer_sizes=(128, 64, 32),
       policy_obs_key="hl_obs",
       value_obs_key="hl_obs",
     ),
     ll_network_factory=config_dict.create(
-      hidden_layer_sizes=(512, 256, 128),
+      hidden_layer_sizes=(64, 32, 16),
       obs_key="ll_obs",
     ),
     ll_learning_config=config_dict.create(
-      ll_opt_max_grad_norm=1,
-      learning_rate=3e-4
+      ll_opt_max_grad_norm=None,
+      learning_rate=15e-5
     )
-
   )
 
   env_config["rl_config"] = rl_config
@@ -105,23 +105,20 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     if reference_trajectory:
       self._qpos_ref, self._qvel_ref = reference_trajectory
     else:
-      # Placeholder: Generate a simple sine wave trajectory
+      # Placeholder trajectory
       self._qpos_ref, self._qvel_ref = self._generate_placeholder_trajectory()
 
     self._ref_traj_len = self._qpos_ref.shape[0]
-
-    # --- PD Gains ---
     self.kp = self._config.pd_gains.kp
     self.kd = self._config.pd_gains.kd
 
   def _generate_placeholder_trajectory(self) -> Tuple[jp.ndarray, jp.ndarray]:
     """Generates a simple sine wave reference trajectory."""
-    cfg = config_dict.create(amplitude=1, frequency=0.5, offset=0.5)
-    num_steps = self._config.episode_length  # Assuming ref traj matches episode length
-    times = jp.arange(num_steps) * self._config.ctrl_dt  # Time based on control dt
+    cfg = config_dict.create(amplitude=1, frequency=0.01, offset=1.2)
+    times = jp.arange(1/cfg.frequency/self._config.ctrl_dt) * self._config.ctrl_dt  # Time based on control dt
     qpos_ref = cfg.amplitude * jp.sin(2 * jp.pi * cfg.frequency * times) + cfg.offset
-    qvel_ref = cfg.amplitude * 2 * jp.pi * cfg.frequency * jp.cos(2 * jp.pi * cfg.frequency * times)
-    # Reshape to (time, dim) - assuming 1 DoF
+    qvel_ref = 0 * cfg.amplitude * 2 * jp.pi * cfg.frequency * jp.cos(2 * jp.pi * cfg.frequency * times)
+    # Reshape assuming 1 DoF
     return qpos_ref[:, None], qvel_ref[:, None]
 
   def reset(self, rng: jp.ndarray) -> State:
@@ -132,7 +129,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     low, hi = -self._config.noise_config.reset_noise_scale, self._config.noise_config.reset_noise_scale
     qpos_noise = jax.random.uniform(rng_noise, (self.mjx_model.nq,), minval=low, maxval=hi)
 
-    rng_noise, rng_vel = jax.random.split(rng_noise)
+    rng_noise, rng_vel, rng_offset = jax.random.split(rng_noise,3)
     qvel_noise = jax.random.uniform(rng_vel, (self.mjx_model.nv,), minval=low, maxval=hi)
 
     qpos = self.mjx_model.qpos0 + qpos_noise
@@ -145,7 +142,8 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     data = mjx.forward(self.mjx_model, data)  # Compute initial derived quantities
 
     # Initial reference trajectory time index
-    ref_time_idx = 0
+    ref_time_idx = jax.random.randint(rng_offset, shape=(1,),
+                                      minval=0, maxval=self._ref_traj_len, dtype=jp.int16)[0]
     qpos_ref_t = self._qpos_ref[ref_time_idx]
     qvel_ref_t = self._qvel_ref[ref_time_idx]
 
@@ -157,7 +155,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
       # Placeholders for fields for the LL loss calculation
       'desired_torque': jp.zeros(self.mjx_model.nv),
       'actual_torque': jp.zeros(self.mjx_model.nv),
-      'jac_torque_act': jp.zeros((self.mjx_model.nv, self.mjx_model.na)),
+      'jac_torque_act': jp.zeros((self.mjx_model.nv, self.mjx_model.na))
     }
 
     # Get initial hierarchical observations
@@ -207,7 +205,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     """Applies LL ctrl action, steps physics, calculates rewards and next state."""
     data = state.data
 
-    next_data = mjx_env.step(self.mjx_model, data, action, self._config.action_repeat)
+    next_data = mjx_env.step(self.mjx_model, data, action, self.n_substeps)
 
     actual_torque = next_data.qfrc_actuator  # Torque resulting from LL ctrl
 
@@ -215,16 +213,20 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
     jac_torque_act = self.calculate_torque_activation_jacobian(data)
 
     # --- Calculate HL Reward ---
-    ctrl_cost = (self._config.reward_config.ctrl_cost_weight  # TODO axis for sum?
-                 * jp.sum(jp.square(state.info['desired_torque'] )) / self.mjx_model.nv)
+    # TODO axis for sum?
+    ctrl_cost = (self._config.reward_config.ctrl_cost_weight
+                 * jp.sum(jp.square(self._config.reward_config.ctrl_cost_scale * state.info['desired_torque'] ))
+                 / self.mjx_model.nv
+                 )
 
     state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
     qpos_ref_t = self._qpos_ref[state.info['ref_time_idx']]
 
     angle_error = qpos_ref_t - next_data.qpos
-    angle_reward = jp.exp(-self._config.reward_config.angle_reward_weight
-                          * jp.sum(jp.square(angle_error)) / self.mjx_model.nv)
-    reward = angle_reward # TODO - ctrl_cost
+    angle_reward = (self._config.reward_config.angle_reward_weight
+                    * jp.exp(-self._config.reward_config.angle_reward_scale
+                             * jp.sum(jp.square(angle_error)) / self.mjx_model.nv))
+    reward = angle_reward - ctrl_cost
 
     # Prepare next observations for HL controller
     next_info_for_obs = {'ref_qpos': self._qpos_ref[(state.info['ref_time_idx'] + 1) % self._ref_traj_len]}

@@ -522,12 +522,14 @@ def train(
         optimizer_state=hl_optimizer_state,
     )
 
-    (_, _), ll_params, ll_optimizer_state = ll_gradient_update_fn(
+    (_, ll_metrics), ll_params, ll_optimizer_state = ll_gradient_update_fn(
         ll_params,
         ll_normalizer_params,
         ll_data,
         optimizer_state=ll_optimizer_state,
     )
+
+    metrics.update(ll_metrics)
 
     return ((hl_optimizer_state, ll_optimizer_state), (hl_params, ll_params), key), metrics
 
@@ -908,8 +910,8 @@ def train(
       hl_training_state.params.value,
   ))
   ll_params = _unpmap((
-      hl_training_state.normalizer_params,
-      hl_training_state.params
+      ll_training_state.normalizer_params,
+      ll_training_state.params
   ))
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()

@@ -45,7 +45,7 @@ import wandb
 
 import mujoco_playground
 from mujoco_playground import registry
-from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn
+from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn, make_ll_network
 from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
@@ -290,7 +290,7 @@ def main(argv):
   )
 
   ll_network_fn = (
-    networks.make_policy_network
+    make_ll_network
   )
 
   if hasattr(ppo_params, "hl_network_factory"):
@@ -322,12 +322,11 @@ def main(argv):
   if "num_eval_envs" in training_params:
     del training_params["num_eval_envs"]
 
-  training_params["ll_optimizer"] = optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate),
+  training_params["ll_optimizer"] = optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate)
   if env_cfg.rl_config.ll_learning_config.ll_opt_max_grad_norm is not None:
-    # TODO: Move gradient clipping to `training/gradients.py`.
     training_params["ll_optimizer"] = optax.chain(
         optax.clip_by_global_norm(env_cfg.rl_config.ll_learning_config.ll_opt_max_grad_norm),
-        optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate),
+        optax.adam(learning_rate=env_cfg.rl_config.ll_learning_config.learning_rate)
     )
 
 
@@ -385,13 +384,16 @@ def main(argv):
   print("Starting inference...")
 
   # Create inference function
-  inference_fn = make_inference_fn(params, deterministic=True)
-  jit_inference_fn = jax.jit(inference_fn)
+  hl_inference_fn = make_inference_fn[0](params[0], deterministic=True)
+  jit_hl_inference_fn = jax.jit(hl_inference_fn)
+  ll_inference_fn = make_inference_fn[1](params[1], deterministic=True)
+  jit_ll_inference_fn = jax.jit(ll_inference_fn)
 
   # Prepare for evaluation
   num_envs = 1
 
   jit_reset = jax.jit(eval_env.reset)
+  jit_hl_step = jax.jit(eval_env.hl_step)
   jit_step = jax.jit(eval_env.step)
 
   rng = jax.random.PRNGKey(123)
@@ -404,9 +406,12 @@ def main(argv):
 
   # Run evaluation rollout
   for _ in range(env_cfg.episode_length):
-    act_rng, rng = jax.random.split(rng)
-    ctrl, _ = jit_inference_fn(state.obs, act_rng)
-    state = jit_step(state, ctrl)
+    hl_act_rng, ll_act_rng, rng = jax.random.split(rng,3)
+    hl_actions, hl_policy_extras = jit_hl_inference_fn(state.obs, hl_act_rng)
+    mid_state = jit_hl_step(state, hl_actions)
+    actions, ll_policy_extras = jit_ll_inference_fn(mid_state.obs, ll_act_rng)
+
+    state = jit_step(state, actions)
     state0 = (
         state
     )
