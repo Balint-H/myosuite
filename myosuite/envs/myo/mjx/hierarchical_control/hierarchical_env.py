@@ -18,6 +18,23 @@ from mujoco_playground._src.wrapper import Wrapper, BraxDomainRandomizationVmapW
 
 
 class HierarchicalEnv(mjx_env.MjxEnv, abc.ABC):
+
+  def __init__(self, xml_path, config, config_overrides):
+    super().__init__(config, config_overrides)
+    spec = mujoco.MjSpec.from_file(xml_path)
+    spec = self.preprocess_spec(spec)
+
+    self._mj_model = spec.compile()
+    self._mj_model.opt.timestep = self.sim_dt
+
+    self._mjx_model = mjx.put_model(self._mj_model)
+    self._xml_path = xml_path
+
+    self._mjx_model = mjx.put_model(self._mj_model)
+
+  def preprocess_spec(self, spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    return spec
+
   @abc.abstractmethod
   def hl_step(self, state: State, action: jax.Array) -> State:
     """Run high-level control, calculate input to low-level systems. Don't run dynamics yet."""

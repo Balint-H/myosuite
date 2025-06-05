@@ -74,7 +74,7 @@ def default_config() -> config_dict.ConfigDict:
   return env_config
 
 
-class HierarchicalPlaygroundElbow(HierarchicalEnv):
+class MjxElbow(HierarchicalEnv):
   """Hierarchical elbow environment with internal PD + HL modulation."""
 
   def __init__(
@@ -85,14 +85,10 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
       xml_path: Optional[str] = None,  # Allow passing xml path
       reference_trajectory: Optional[Tuple[jp.ndarray, jp.ndarray]] = None  # Allow passing trajectory
   ) -> None:
-    super().__init__(config, config_overrides)
+
     xml_path = (rf"../../assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
                 if xml_path is None else xml_path)
-    self._mj_model = mujoco.MjModel.from_xml_path(xml_path)
-    self._mj_model.opt.timestep = self.sim_dt
-
-    self._mjx_model = mjx.put_model(self._mj_model)
-    self._xml_path = xml_path
+    super().__init__(xml_path, config, config_overrides)
 
     self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
     self._mj_model.opt.iterations = 6
@@ -247,8 +243,8 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
   def _get_hl_obs(self, data: mjx.Data, info: Dict) -> jp.ndarray:
     """Get observations for the high-level policy."""
-    ref_qpos = info.get('ref_qpos', jp.zeros_like(data.qpos))  # Get ref info if available
-    ref_qvel = info.get('ref_qvel', jp.zeros_like(data.qvel))
+    ref_qpos = info['ref_qpos']
+    ref_qvel = info['ref_qvel']
     return jp.concatenate([
         data.qpos,
         data.qvel,
@@ -292,12 +288,12 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
   @property
   def action_size(self) -> int:
-    """Returns the size of the low-level action space (ctrl)."""
+    """The size of the low-level action space (ctrl)."""
     return self._mjx_model.nu
 
   @property
   def hl_action_size(self) -> int:
-    """Returns the size of the high-level action space (modulation)."""
+    """The size of the high-level action space (joint torque)."""
     return self.mjx_model.nv
 
   @property
@@ -310,7 +306,7 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
 
 if __name__ == '__main__':
-  env = HierarchicalPlaygroundElbow()
+  env = MjxElbow()
   jit_step = jax.jit(env.step)
   jit_reset = jax.jit(env.reset)
   jit_hl_step = jax.jit(env.hl_step)

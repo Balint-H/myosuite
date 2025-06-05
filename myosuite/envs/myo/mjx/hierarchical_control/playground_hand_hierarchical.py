@@ -74,52 +74,73 @@ def default_config() -> config_dict.ConfigDict:
   return env_config
 
 
-class HierarchicalPlaygroundElbow(HierarchicalEnv):
+class MjxHand(HierarchicalEnv):
   """Hierarchical elbow environment with internal PD + HL modulation."""
 
   def __init__(
       self,
       config: config_dict.ConfigDict = default_config(),
       config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
-      is_msk=True,
-      xml_path: Optional[str] = None,  # Allow passing xml path
-      reference_trajectory: Optional[Tuple[jp.ndarray, jp.ndarray]] = None  # Allow passing trajectory
+      reference_trajectory: Optional[Tuple[jp.ndarray, jp.ndarray]] = None,  # Allow passing trajectory
+      collisions_enabled: bool = False
   ) -> None:
-    super().__init__(config, config_overrides)
-    xml_path = (rf"../../assets/elbow/myoelbow_1dof{6 if is_msk else 0}muscles_mjx.xml"
-                if xml_path is None else xml_path)
-    self._mj_model = mujoco.MjModel.from_xml_path(xml_path)
-    self._mj_model.opt.timestep = self.sim_dt
-
-    self._mjx_model = mjx.put_model(self._mj_model)
-    self._xml_path = xml_path
+    xml_path = rf"../../assets/hand/myohand_pose.xml"
+    self.collisions_enabled = collisions_enabled
+    self.flexion_joint_ids = jp.array([])
+    super().__init__(xml_path, config, config_overrides)
 
     self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
     self._mj_model.opt.iterations = 6
     self._mj_model.opt.ls_iterations = 6
     self._mj_model.opt.disableflags = self._mj_model.opt.disableflags | mjx.DisableBit.EULERDAMP
 
-    self._mjx_model = mjx.put_model(self._mj_model)
 
     # --- Reference Trajectory ---
     if reference_trajectory:
       self._qpos_ref, self._qvel_ref = reference_trajectory
     else:
-      # Placeholder trajectory
-      self._qpos_ref, self._qvel_ref = self._generate_placeholder_trajectory()
+      self._qpos_ref, self._qvel_ref = self._generate_placeholder_trajectory(n_freqs=6, order=jp.arange(6))
 
     self._ref_traj_len = self._qpos_ref.shape[0]
     self.kp = self._config.pd_gains.kp
     self.kd = self._config.pd_gains.kd
+    self.flexion_qposadr = jp.concatenate([self.mj_model.joint(i).qposadr for i in self.flexion_joint_ids])
+    self.flexion_dofadr = jp.concatenate([self.mj_model.joint(i).dofadr for i in self.flexion_joint_ids])
 
-  def _generate_placeholder_trajectory(self) -> Tuple[jp.ndarray, jp.ndarray]:
-    """Generates a simple sine wave reference trajectory."""
-    cfg = config_dict.create(amplitude=1, frequency=0.01, offset=1.2)
-    times = jp.arange(1/cfg.frequency/self._config.ctrl_dt) * self._config.ctrl_dt  # Time based on control dt
-    qpos_ref = cfg.amplitude * jp.sin(2 * jp.pi * cfg.frequency * times) + cfg.offset
-    qvel_ref = 0 * cfg.amplitude * 2 * jp.pi * cfg.frequency * jp.cos(2 * jp.pi * cfg.frequency * times)
-    # Reshape assuming 1 DoF
-    return qpos_ref[:, None], qvel_ref[:, None]
+  def preprocess_spec(self, spec: mujoco.MjSpec):
+    spec = super().preprocess_spec(spec)
+    for s in spec.sites:
+      if "_target" in s.name:
+        print(f"Deleted target site \"{s.name}\"")
+        s.delete()
+    for t in spec.tendons:
+      if "_err" in t.name:
+        print(f"Deleted error tendon \"{t.name}\"")
+        t.delete()
+    # TODO: Verify visual geoms impact performance
+    for g in spec.geoms:
+      if not g.name or "floor" in g.name:
+        print(f"Deleted visual geom")
+        g.delete()
+    flexion_joints = [j for j in spec.joints if "flexion" in j.name]
+    finger_joints = [j for j in flexion_joints if "flexion" in j.name]
+    return spec
+
+  def _generate_placeholder_trajectory(self,
+                                       ctrl_dt=0.001,
+                                       n_freqs=5,
+                                       base_freq=0.05,
+                                       amplitudes=(1.2,),
+                                       offsets=(0,),
+                                       order=None) -> Tuple[jp.ndarray, jp.ndarray]:
+    frequencies = (jp.arange(n_freqs) + 1 if order is None else order) * base_freq
+    amplitudes = jp.array(amplitudes)
+    offsets = jp.array(offsets)
+    times = jp.arange(1 / base_freq / ctrl_dt) * ctrl_dt  # Time based on control dt
+    qpos_ref = amplitudes[None, :] * jp.sin(2 * jp.pi * frequencies[None, :] * times[:, None]) + offsets
+    qvel_ref = (amplitudes[None, :] * 2 * jp.pi * frequencies[None, :]
+                * jp.cos(2 * jp.pi * frequencies[None, :] * times[:, None]))
+    return qpos_ref, qvel_ref
 
   def reset(self, rng: jp.ndarray) -> State:
     """Resets the environment to an initial state."""
@@ -310,59 +331,6 @@ class HierarchicalPlaygroundElbow(HierarchicalEnv):
 
 
 if __name__ == '__main__':
-  env = HierarchicalPlaygroundElbow()
-  jit_step = jax.jit(env.step)
-  jit_reset = jax.jit(env.reset)
-  jit_hl_step = jax.jit(env.hl_step)
-  rng = jax.random.key(0)
-  rng = jp.array([1708187461, 2772610763], dtype=jp.uint32)
 
-  state = env.reset(rng)
-  state = jit_hl_step(state, jp.array([0.0]))
-  state = jit_step(state, jp.zeros(6))
-
-  ll_data = LLSupervisedData(
-    ll_obs=state.obs,
-    activation_designated=jp.zeros(6),
-    hl_desired_torque=state.info['desired_torque'],
-    torque_designated=state.info['actual_torque'],
-    # Pre-computed Jacobian: d(torque)/d(act)
-    jacobian=state.info['jac_torque_act']
-  )
-
-  def dummy_batch(arr):
-    return jp.repeat(jp.repeat(arr[None, None, ...], 256, 0), 20, 1)
-
-  ll_data = jax.tree_util.tree_map(dummy_batch, ll_data)
-
-  from loss_hierarchical import hierarchical_ll_loss
-  import functools
-  from brax.training import networks
-  from brax.training.acme import running_statistics, types
-
-  d_loss = jax.jacrev(hierarchical_ll_loss, has_aux=True)
-
-
-  ll_network_fn = (
-    networks.make_policy_network
-  )
-
-  ll_network_factory = functools.partial(
-    ll_network_fn, **default_config().rl_config.ll_network_factory
-  )
-
-  obs_shape = jax.tree_util.tree_map(lambda x: x.shape, state.obs)
-
-  ll_network = ll_network_factory(
-    env.action_size, obs_shape, preprocess_observations_fn=running_statistics.normalize
-  )
-
-  obs_shape = jax.tree_util.tree_map(  # TODO: check if we need sub obs shapes?
-    lambda x: jp.array(x.shape, jp.dtype('float32')), state.obs
-  )
-  params = ll_network.init(jax.random.PRNGKey(0))
-  normalizer_params = running_statistics.init_state(obs_shape)
-
-  grads = d_loss(params, normalizer_params, ll_data, ll_network)
   pass
 
