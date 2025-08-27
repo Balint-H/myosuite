@@ -29,14 +29,13 @@ class MjxPoseEnvV0(mjx_env.MjxEnv):
         self._mj_model.opt.ls_iterations = 6
         self._mj_model.opt.disableflags = self._mj_model.opt.disableflags | mjx.DisableBit.EULERDAMP
 
-        self._mjx_model = mjx.put_model(self._mj_model)
+        self._mjx_model = mjx.put_model(self._mj_model, impl="warp")
         self._xml_path = config.model_path.as_posix()
 
         self.far_th = self._config.far_th
 
     def preprocess_spec(self, spec:mujoco.MjSpec):
         for geom in spec.geoms:
-            if geom.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
                 geom.conaffinity = 0
                 geom.contype = 0
                 print(f"Disabled contacts for cylinder geom named \"{geom.name}\"")
@@ -70,7 +69,8 @@ class MjxPoseEnvV0(mjx_env.MjxEnv):
         # as it has to be determined in a parallelized manner
         info = {'rng': rng, 'target_angles': target_angles}
 
-        data = mjx_env.init(self.mjx_model, qpos=qpos, qvel=qvel, ctrl=jp.zeros((self.mjx_model.nu,)))
+        data = make_data(self.mj_model, qpos=qpos, qvel=qvel, ctrl=jp.zeros((self.mjx_model.nu,)),
+                                 impl="warp", nconmax=10, njmax=10)
 
         obs = self._get_obs(data, info)
         reward, done, zero = jp.zeros(3)
@@ -143,3 +143,35 @@ class MjxPoseEnvV0(mjx_env.MjxEnv):
     @property
     def mjx_model(self) -> mjx.Model:
         return self._mjx_model
+
+
+def make_data(
+    model: mujoco.MjModel,
+    qpos: Optional[jax.Array] = None,
+    qvel: Optional[jax.Array] = None,
+    ctrl: Optional[jax.Array] = None,
+    act: Optional[jax.Array] = None,
+    mocap_pos: Optional[jax.Array] = None,
+    mocap_quat: Optional[jax.Array] = None,
+    impl: Optional[str] = None,
+    nconmax: Optional[int] = None,
+    njmax: Optional[int] = None,
+    device: Optional[jax.Device] = None,
+) -> mjx.Data:
+  """Initialize MJX Data."""
+  data = mjx.make_data(
+      model, impl=impl, nconmax=nconmax, njmax=njmax, device=device
+  )
+  if qpos is not None:
+    data = data.replace(qpos=qpos)
+  if qvel is not None:
+    data = data.replace(qvel=qvel)
+  if ctrl is not None:
+    data = data.replace(ctrl=ctrl)
+  if act is not None:
+    data = data.replace(act=act)
+  if mocap_pos is not None:
+    data = data.replace(mocap_pos=mocap_pos.reshape(model.nmocap, -1))
+  if mocap_quat is not None:
+    data = data.replace(mocap_quat=mocap_quat.reshape(model.nmocap, -1))
+  return data

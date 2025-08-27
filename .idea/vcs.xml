@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/MPL_sim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/YCB_sim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/furniture_sim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/myo_model" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/myo_sim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/myosuite/simhive/object_sim" vcs="Git" />
+  </component>
+</project>
